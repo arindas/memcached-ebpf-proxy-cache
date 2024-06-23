@@ -1,0 +1,35 @@
+[package]
+name = "memcached-ebpf-proxy-cache-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = "0.1.0"
+aya-log-ebpf = "0.1.0"
+memcached-ebpf-proxy-cache-common = { path = "../memcached-ebpf-proxy-cache-common" }
+
+[[bin]]
+name = "memcached-ebpf-proxy-cache"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1
+rpath = false
+
+[profile.release]
+lto = true
+panic = "abort"
+codegen-units = 1
+
+[workspace]
+members = []

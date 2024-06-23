@@ -1,0 +1,3 @@
+{
+  "rust-analyzer.linkedProjects": ["Cargo.toml", "memcached-ebpf-proxy-cache-ebpf/Cargo.toml"]
+}

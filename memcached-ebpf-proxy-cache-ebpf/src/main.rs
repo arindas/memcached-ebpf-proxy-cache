@@ -13,7 +13,7 @@ use core::mem;
 use core::slice;
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, ProgTc, ProgXdp, CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET,
-    MAX_KEY_LENGTH, MAX_PACKET_LENGTH,
+    MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -158,7 +158,7 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
         slice_at::<u8>(&ctx, payload_offset, 4).ok_or(CacheError::PtrSliceCoercionError)?;
 
     match (protocol, dest, first_4_bytes) {
-        (IpProto::Udp, 11211, b"get ") => {
+        (IpProto::Udp, MEMCACHED_PORT, b"get ") => {
             let cache_usage_stats = CACHE_USAGE_STATS
                 .get_ptr_mut(0)
                 .ok_or(CacheError::MapLookupError)?;
@@ -210,7 +210,7 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
             unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::HashKeys as u32) }
                 .map_err(|_| CacheError::TailCallError)?;
         }
-        (IpProto::Tcp, 11211, _) => {
+        (IpProto::Tcp, MEMCACHED_PORT, _) => {
             unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::InvalidateCache as u32) }
                 .map_err(|_| CacheError::TailCallError)?;
         }

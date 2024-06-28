@@ -17,6 +17,8 @@ pub const MAX_KEYS_IN_PACKET: u32 = MAX_KEY_IN_MULTIGET;
 pub const FNV_OFFSET_BASIS_32: u32 = 2166136261;
 pub const FNV_PRIME_32: u32 = 16777619;
 
+pub const MEMCACHED_PORT: u16 = 11211;
+
 #[repr(C)]
 pub struct CacheEntry {
     pub lock: bpf_spin_lock,

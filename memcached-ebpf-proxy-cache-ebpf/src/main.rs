@@ -64,6 +64,19 @@ static MAP_PROGS_XDP: ProgramArray = ProgramArray::with_max_entries(ProgXdp::Max
 #[map]
 static MAP_PROGS_TC: ProgramArray = ProgramArray::with_max_entries(ProgTc::Max as u32, 0);
 
+pub enum CacheError {
+    HeaderParseError,
+    PtrSliceCoercionError,
+    MapLookupError,
+    RequestTooLarge,
+}
+
+impl From<CacheError> for u32 {
+    fn from(val: CacheError) -> Self {
+        val as u32
+    }
+}
+
 #[inline(always)]
 pub fn compute_ip_checksum(ip: *const Ipv4Hdr) -> u16 {
     // SAFETY: num u16 chunks in *X
@@ -80,84 +93,81 @@ pub fn compute_ip_checksum(ip: *const Ipv4Hdr) -> u16 {
     (!((csum & 0xffff) + (csum >> 16))) as u16
 }
 
-#[allow(clippy::result_unit_err)]
 #[inline(always)]
-pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
+pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
     let start = ctx.data();
     let end = ctx.data_end();
     let len = mem::size_of::<T>();
 
     if start + offset + len > end {
-        return Err(());
+        return None;
     }
 
-    Ok((start + offset) as *const T)
+    Some((start + offset) as *const T)
 }
 
-#[allow(clippy::result_unit_err)]
 #[inline(always)]
-pub fn slice_at<T>(ctx: &XdpContext, offset: usize) -> Result<&[T], ()> {
+pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<&[T]> {
     let start = ctx.data();
     let end = ctx.data_end();
     let len = mem::size_of::<T>();
 
-    if start + offset + len > end {
-        return Err(());
+    if start + offset + slice_len * len > end {
+        return None;
     }
 
-    let ptr = (start + offset) as *const T;
-    let slice_len = (end - offset) / len;
-
-    // SAFETY: slice contains number of T that can be acoomodated
-    // within start..end
-    Ok(unsafe { slice::from_raw_parts(ptr, slice_len) })
+    Some(unsafe { slice::from_raw_parts((start + offset) as *const T, slice_len) })
 }
 
-fn try_rx_filter(ctx: XdpContext) -> Result<u32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?; //
+fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
+    info!(&ctx, "rx_filter: received a packet");
+
+    let ethhdr: *const EthHdr = ptr_at(&ctx, 0).ok_or(CacheError::HeaderParseError)?;
 
     match unsafe { (*ethhdr).ether_type } {
         EtherType::Ipv4 => {}
-        _ => return Err(()),
+        _ => return Err(CacheError::HeaderParseError.into()),
     }
 
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
+    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN).ok_or(CacheError::HeaderParseError)?;
 
     let protocol = unsafe { (*ipv4hdr).proto };
 
-    let (dest, payload) = match protocol {
-        IpProto::Tcp => {
-            let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-            (
-                u16::from_be(unsafe { (*tcphdr).dest }),
-                slice_at::<u8>(&ctx, EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN)?,
-            )
-        }
+    let (dest, payload_offset) = match protocol {
         IpProto::Udp => {
-            let udphdr: *const UdpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
+            let udphdr: *const UdpHdr =
+                ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*udphdr).dest }),
-                slice_at::<u8>(
-                    &ctx,
-                    EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + size_of::<MemcachedUdpHeader>(),
-                )?,
+                EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + size_of::<MemcachedUdpHeader>(),
             )
         }
-        _ => return Err(()),
+        IpProto::Tcp => {
+            let tcphdr: *const TcpHdr =
+                ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
+            (
+                u16::from_be(unsafe { (*tcphdr).dest }),
+                EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN,
+            )
+        }
+        _ => return Err(0u32),
     };
 
-    if payload.len() < 4 {
-        return Err(());
-    }
+    let first_4_bytes =
+        slice_at::<u8>(&ctx, payload_offset, 4).ok_or(CacheError::PtrSliceCoercionError)?;
 
-    match (protocol, dest, &payload[..4]) {
+    match (protocol, dest, first_4_bytes) {
         (IpProto::Udp, 11211, b"get ") => {
-            let cache_usage_stats = CACHE_USAGE_STATS.get_ptr_mut(0).ok_or(())?;
+            let cache_usage_stats = CACHE_USAGE_STATS
+                .get_ptr_mut(0)
+                .ok_or(CacheError::MapLookupError)?;
             unsafe {
                 (*cache_usage_stats).get_recv_count += 1;
             }
 
-            let parsing_context = PARSING_CONTEXT.get_ptr_mut(0).ok_or(())?;
+            let parsing_context = PARSING_CONTEXT
+                .get_ptr_mut(0)
+                .ok_or(CacheError::MapLookupError)?;
 
             unsafe {
                 (*parsing_context).key_count = 0;
@@ -165,14 +175,21 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, ()> {
                 (*parsing_context).write_packet_offset = 0;
             }
 
-            let first_non_space_char_pos = &payload[4..]
-                .iter()
-                .take(MAX_PACKET_LENGTH)
-                .position(|&x| x != b' ')
-                .ok_or(())?;
+            let mut pos = 4;
+
+            while pos < MAX_PACKET_LENGTH
+                && ctx.data() + pos + mem::size_of::<u8>() <= ctx.data_end()
+                && unsafe { *((ctx.data() + pos) as *const u8) } == b' '
+            {
+                pos += 1;
+            }
+
+            if pos >= MAX_PACKET_LENGTH {
+                return Err(CacheError::RequestTooLarge.into());
+            }
 
             unsafe {
-                (*parsing_context).read_packet_offset = *first_non_space_char_pos as u16;
+                (*parsing_context).read_packet_offset = pos as u16;
             }
 
             unsafe {
@@ -182,20 +199,20 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, ()> {
                         + Ipv4Hdr::LEN
                         + UdpHdr::LEN
                         + size_of::<MemcachedUdpHeader>()
-                        + first_non_space_char_pos) as i32,
+                        + pos) as i32,
                 )
             }
             .eq(&0)
             .then_some(())
-            .ok_or(())?;
+            .ok_or(0u32)?;
 
-            unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::HashKeys as u32) }.map_err(|_| ())?;
+            unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::HashKeys as u32) }.map_err(|_| 0u32)?;
         }
         (IpProto::Tcp, 11211, _) => {
             unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::InvalidateCache as u32) }
-                .map_err(|_| ())?;
+                .map_err(|_| 0u32)?;
         }
-        _ => Err(()),
+        _ => Err(0u32),
     }
 }
 

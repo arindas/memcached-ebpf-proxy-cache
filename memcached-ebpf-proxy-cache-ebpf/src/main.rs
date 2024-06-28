@@ -4,12 +4,13 @@
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{Array, PerCpuArray},
+    maps::{Array, PerCpuArray, ProgramArray},
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
 use memcached_ebpf_proxy_cache_common::{
-    CacheEntry, CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH,
+    CacheEntry, CacheUsageStatistics, ProgTc, ProgXdp, CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET,
+    MAX_KEY_LENGTH,
 };
 
 #[repr(C)]
@@ -32,6 +33,29 @@ pub struct MemcachedKey {
 
 #[map]
 static MAP_KEYS: PerCpuArray<MemcachedKey> = PerCpuArray::with_max_entries(MAX_KEYS_IN_PACKET, 0);
+
+#[repr(C)]
+pub struct ParsingContext {
+    pub key_count: u32,
+    pub current_key: u32,
+
+    pub write_packet_offset: u16,
+    pub read_packet_offset: u16,
+}
+
+#[map]
+static PARSING_CONTEXT: PerCpuArray<ParsingContext> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static CACHE_USAGE_STATS: PerCpuArray<CacheUsageStatistics> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static MAP_PROGS_XDP: ProgramArray = ProgramArray::with_max_entries(ProgXdp::Max as u32, 0);
+
+#[map]
+static MAP_PROGS_TC: ProgramArray = ProgramArray::with_max_entries(ProgTc::Max as u32, 0);
+
+fn compute_ip_checksum() {}
 
 #[xdp]
 pub fn memcached_ebpf_proxy_cache(ctx: XdpContext) -> u32 {

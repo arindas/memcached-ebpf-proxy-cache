@@ -25,3 +25,30 @@ pub struct CacheEntry {
     pub hash: u32,
     pub data: [u8; MAX_CACHE_DATA_SIZE],
 }
+
+pub enum ProgXdp {
+    HashKeys,
+    PreparePacket,
+    WriteReply,
+    InvalidateCache,
+
+    Max,
+}
+
+pub enum ProgTc {
+    UpdateCache,
+
+    Max,
+}
+
+pub struct CacheUsageStatistics {
+    pub get_recv_count: u32,
+    pub set_recv_count: u32,
+
+    pub hit_misprediction: u32,
+    pub hit_count: u32,
+
+    pub miss_count: u32,
+    pub update_count: u32,
+    pub invalidation_count: u32,
+}

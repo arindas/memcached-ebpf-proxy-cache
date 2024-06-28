@@ -69,6 +69,7 @@ pub enum CacheError {
     PtrSliceCoercionError,
     MapLookupError,
     BadRequestPacket,
+    TailCallError,
 }
 
 impl From<CacheError> for u32 {
@@ -206,11 +207,12 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
             .then_some(())
             .ok_or(0u32)?;
 
-            unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::HashKeys as u32) }.map_err(|_| 0u32)?;
+            unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::HashKeys as u32) }
+                .map_err(|_| CacheError::TailCallError)?;
         }
         (IpProto::Tcp, 11211, _) => {
             unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::InvalidateCache as u32) }
-                .map_err(|_| 0u32)?;
+                .map_err(|_| CacheError::TailCallError)?;
         }
         _ => Err(0u32),
     }

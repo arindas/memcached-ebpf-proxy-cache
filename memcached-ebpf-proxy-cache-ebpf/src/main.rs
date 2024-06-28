@@ -68,7 +68,7 @@ pub enum CacheError {
     HeaderParseError,
     PtrSliceCoercionError,
     MapLookupError,
-    RequestTooLarge,
+    BadRequestPacket,
 }
 
 impl From<CacheError> for u32 {
@@ -185,7 +185,7 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
             }
 
             if pos >= MAX_PACKET_LENGTH {
-                return Err(CacheError::RequestTooLarge.into());
+                return Err(CacheError::BadRequestPacket.into());
             }
 
             unsafe {

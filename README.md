@@ -1,5 +1,7 @@
 # memcached-ebpf-proxy-cache
 
+Accelerate Memcached with eBPF.
+
 ## Prerequisites
 
 1. Install bpf-linker: `cargo install bpf-linker`

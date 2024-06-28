@@ -8,18 +8,20 @@ pub const MAX_ADDITIONAL_PAYLOAD_BYTES: usize = 53;
 pub const MAX_CACHE_DATA_SIZE: usize =
     MAX_KEY_LENGTH + MAX_VAL_LENGTH + MAX_ADDITIONAL_PAYLOAD_BYTES;
 
-pub const MAX_KEY_IN_MULTIGET: usize = 30;
-pub const MAX_CACHE_ENTRY_COUNT: usize = 3250000;
+pub const MAX_KEY_IN_MULTIGET: u32 = 30;
+pub const CACHE_ENTRY_COUNT: u32 = 3250000;
 
 pub const MAX_PACKET_LENGTH: usize = 1500;
-pub const MAX_KEY_IN_PACKET: usize = MAX_KEY_IN_MULTIGET;
+pub const MAX_KEYS_IN_PACKET: u32 = MAX_KEY_IN_MULTIGET;
 
 pub const FNV_OFFSET_BASIS_32: u32 = 2166136261;
 pub const FNV_PRIME_32: u32 = 16777619;
 
+#[repr(C)]
 pub struct CacheEntry {
     pub lock: bpf_spin_lock,
     pub len: u32,
     pub valid: u8,
     pub hash: u32,
+    pub data: [u8; MAX_CACHE_DATA_SIZE],
 }

@@ -138,6 +138,25 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
     Some(unsafe { slice::from_raw_parts((start + offset) as *const T, slice_len) })
 }
 
+#[inline(always)]
+pub fn skip_chars_in_packet(
+    ctx: &XdpContext,
+    start_pos: usize,
+    skip_char: u8,
+    pos_upper_bound: usize,
+) -> usize {
+    let mut pos = start_pos;
+
+    while pos < pos_upper_bound
+        && ctx.data() + pos + mem::size_of::<u8>() <= ctx.data_end()
+        && unsafe { *((ctx.data() + pos) as *const u8) } == skip_char
+    {
+        pos += 1;
+    }
+
+    pos
+}
+
 fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
     let ethhdr: *const EthHdr = ptr_at(ctx, 0).ok_or(CacheError::HeaderParseError)?;
 
@@ -202,14 +221,7 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
                 (*parsing_context).write_packet_offset = 0;
             }
 
-            let mut pos = 4;
-
-            while pos < MAX_PACKET_LENGTH
-                && ctx.data() + pos + mem::size_of::<u8>() <= ctx.data_end()
-                && unsafe { *((ctx.data() + pos) as *const u8) } == b' '
-            {
-                pos += 1;
-            }
+            let pos = skip_chars_in_packet(ctx, 4, b' ', MAX_PACKET_LENGTH);
 
             debug!(ctx, "rx_filter: get packet keys begin at {}", pos);
 

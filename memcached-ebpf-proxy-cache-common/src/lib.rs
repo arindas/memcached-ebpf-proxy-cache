@@ -1,6 +1,7 @@
 #![no_std]
 
 use aya_ebpf::bindings::bpf_spin_lock;
+use core::iter;
 
 pub const MAX_KEY_LENGTH: usize = 250;
 pub const MAX_VAL_LENGTH: usize = 1000;
@@ -37,10 +38,49 @@ pub enum CallableProgXdp {
     Max,
 }
 
+impl AsRef<str> for CallableProgXdp {
+    fn as_ref(&self) -> &str {
+        match self {
+            CallableProgXdp::HashKeys => "hash_keys",
+            CallableProgXdp::PreparePacket => "prepare_packet",
+            CallableProgXdp::WriteReply => "write_reply",
+            CallableProgXdp::InvalidateCache => "invalidate_cache",
+            CallableProgXdp::Max => "SENTINEL_MAX",
+        }
+    }
+}
+
+impl CallableProgXdp {
+    pub fn variants() -> impl Iterator<Item = CallableProgXdp> {
+        use CallableProgXdp::*;
+
+        iter::empty()
+            .chain(iter::once(HashKeys))
+            .chain(iter::once(PreparePacket))
+            .chain(iter::once(WriteReply))
+            .chain(iter::once(InvalidateCache))
+    }
+}
+
 pub enum CallableProgTc {
     UpdateCache,
 
     Max,
+}
+
+impl AsRef<str> for CallableProgTc {
+    fn as_ref(&self) -> &str {
+        match self {
+            CallableProgTc::UpdateCache => "update_cache",
+            CallableProgTc::Max => "SENTINEL_MAX",
+        }
+    }
+}
+
+impl CallableProgTc {
+    pub fn variants() -> impl Iterator<Item = CallableProgTc> {
+        iter::once(CallableProgTc::UpdateCache)
+    }
 }
 
 pub struct CacheUsageStatistics {

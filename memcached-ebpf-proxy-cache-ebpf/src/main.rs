@@ -2,8 +2,8 @@
 #![no_main]
 
 use aya_ebpf::{
-    bindings::xdp_action,
-    helpers::bpf_xdp_adjust_head,
+    bindings::{bpf_spin_lock, xdp_action},
+    helpers::{bpf_spin_lock, bpf_spin_unlock, bpf_xdp_adjust_head},
     macros::{map, xdp},
     maps::{Array, PerCpuArray, ProgramArray},
     programs::XdpContext,
@@ -12,8 +12,8 @@ use aya_log_ebpf::{debug, error, info};
 use core::mem;
 use core::slice;
 use memcached_ebpf_proxy_cache_common::{
-    CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, CACHE_ENTRY_COUNT,
-    MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
+    CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
+    CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -74,6 +74,8 @@ pub enum CacheError {
     BadRequestPacket,
     TailCallError,
     UnsupportedProtocol,
+    UnexpectedKeyLen,
+    UnexpectedValLen,
 }
 
 impl AsRef<str> for CacheError {
@@ -86,6 +88,8 @@ impl AsRef<str> for CacheError {
             CacheError::BadRequestPacket => "CacheError::BadRequestPacket",
             CacheError::TailCallError => "CacheError::TailCallError",
             CacheError::UnsupportedProtocol => "CacheError::UnsupportedProtocol",
+            CacheError::UnexpectedKeyLen => "CacheError::UnexpectedKeyLen",
+            CacheError::UnexpectedValLen => "CacheError::UnexpectedValLen",
         }
     }
 }
@@ -276,6 +280,153 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
         }
         Err(err) => {
             error!(&ctx, "rx_filter: Err({})", err.as_ref());
+
+            xdp_action::XDP_PASS
+        }
+    }
+}
+
+fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
+    let _payload_ptr: *const u8 = ptr_at(ctx, ctx.data()).ok_or(CacheError::BadRequestPacket)?;
+
+    let parsing_context = PARSING_CONTEXT
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let memcached_key = MAP_KEYS
+        .get_ptr_mut(unsafe { (*parsing_context).key_count })
+        .ok_or(CacheError::MapLookupError)?;
+
+    let mut hasher = Fnv1AHasher::new();
+
+    let mut offset = 0;
+    let mut done_parsing = false;
+    let mut key_len = 0;
+
+    // use MAX_KEY_LENGTH + 1 as upper bound to make it possible to detect if
+    // key length is greater than MAX_KEY_LENGTH
+    while offset < MAX_KEY_LENGTH + 1
+        && ctx.data() + offset + mem::size_of::<u8>() <= ctx.data_end()
+    {
+        match unsafe { *((ctx.data() + offset) as *const u8) } {
+            b'\r' => {
+                done_parsing = true;
+                break;
+            }
+
+            b' ' => break,
+
+            byte => {
+                hasher.write_byte(byte);
+                key_len += 1;
+            }
+        }
+
+        offset += 1;
+    }
+
+    unsafe { (*memcached_key).hash = hasher.finish() };
+
+    if key_len == 0 || key_len > MAX_KEY_LENGTH {
+        unsafe {
+            bpf_xdp_adjust_head(
+                ctx.ctx,
+                0 - (EthHdr::LEN
+                    + Ipv4Hdr::LEN
+                    + UdpHdr::LEN
+                    + size_of::<MemcachedUdpHeader>()
+                    + (*parsing_context).read_packet_offset as usize) as i32,
+            )
+        }
+        .eq(&0)
+        .then_some(())
+        .ok_or(CacheError::PacketOffsetOutofBounds)?;
+
+        return Err(CacheError::UnexpectedKeyLen);
+    }
+
+    let cache_idx = unsafe { (*memcached_key).hash } % CACHE_ENTRY_COUNT;
+
+    let cache_entry = MAP_KCACHE
+        .get_ptr_mut(cache_idx)
+        .ok_or(CacheError::MapLookupError)?;
+
+    unsafe {
+        bpf_spin_lock(&mut (*cache_entry).lock as *mut bpf_spin_lock);
+    }
+
+    if unsafe { (*cache_entry).valid != 0 && (*cache_entry).hash == (*memcached_key).hash } {
+        unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
+
+        let key = slice_at::<u8>(ctx, 0, key_len).ok_or(CacheError::PtrSliceCoercionError)?;
+
+        unsafe {
+            (*memcached_key).data.copy_from_slice(key);
+            (*parsing_context).key_count += 1;
+        }
+    } else {
+        unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
+
+        let cache_usage_stats = CACHE_USAGE_STATS
+            .get_ptr_mut(0)
+            .ok_or(CacheError::MapLookupError)?;
+
+        unsafe { (*cache_usage_stats).miss_count += 1 };
+    }
+
+    if done_parsing {
+        // reached end of request
+
+        // pop headers + "get " + previous keys
+        unsafe {
+            bpf_xdp_adjust_head(
+                ctx.ctx,
+                0 - (EthHdr::LEN
+                    + Ipv4Hdr::LEN
+                    + UdpHdr::LEN
+                    + size_of::<MemcachedUdpHeader>()
+                    + (*parsing_context).read_packet_offset as usize) as i32,
+            )
+        }
+        .eq(&0)
+        .then_some(())
+        .ok_or(CacheError::PacketOffsetOutofBounds)?;
+
+        if unsafe { (*parsing_context).key_count > 0 } {
+            unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::PreparePacket as u32) }
+                .map_err(|_| CacheError::TailCallError)?;
+        }
+    } else {
+        // more keys to process
+
+        // move offset to start of next key
+        offset += 1;
+        unsafe { (*parsing_context).read_packet_offset += offset as u16 };
+
+        unsafe { bpf_xdp_adjust_head(ctx.ctx, offset as i32) } // push previous key
+            .eq(&0)
+            .then_some(())
+            .ok_or(CacheError::PacketOffsetOutofBounds)?;
+
+        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
+            .map_err(|_| CacheError::TailCallError)?;
+    }
+
+    Ok(xdp_action::XDP_PASS)
+}
+
+#[xdp]
+pub fn hash_keys(ctx: XdpContext) -> u32 {
+    info!(&ctx, "hash_keys: received a packet");
+
+    match try_hash_keys(&ctx) {
+        Ok(ret) => {
+            info!(&ctx, "hash_keys: done processing packet, action: {}", ret);
+
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "hash_keys: Err({})", err.as_ref());
 
             xdp_action::XDP_PASS
         }

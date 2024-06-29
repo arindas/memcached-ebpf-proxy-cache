@@ -20,6 +20,43 @@ pub const FNV_PRIME_32: u32 = 16777619;
 
 pub const MEMCACHED_PORT: u16 = 11211;
 
+pub trait Hasher {
+    fn write_byte(&mut self, byte: u8);
+
+    fn finish(&self) -> u32;
+}
+
+pub struct Fnv1AHasher {
+    state: u32,
+}
+
+impl Fnv1AHasher {
+    pub fn with_state(state: u32) -> Self {
+        Self { state }
+    }
+
+    pub fn new() -> Self {
+        Self::with_state(FNV_OFFSET_BASIS_32)
+    }
+}
+
+impl Default for Fnv1AHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Hasher for Fnv1AHasher {
+    fn write_byte(&mut self, byte: u8) {
+        self.state ^= u32::from(byte);
+        self.state = self.state.wrapping_mul(FNV_PRIME_32);
+    }
+
+    fn finish(&self) -> u32 {
+        self.state
+    }
+}
+
 #[repr(C)]
 pub struct CacheEntry {
     pub lock: bpf_spin_lock,

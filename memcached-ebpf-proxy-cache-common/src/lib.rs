@@ -28,7 +28,7 @@ pub struct CacheEntry {
     pub data: [u8; MAX_CACHE_DATA_SIZE],
 }
 
-pub enum ProgXdp {
+pub enum CallableProgXdp {
     HashKeys,
     PreparePacket,
     WriteReply,
@@ -37,7 +37,7 @@ pub enum ProgXdp {
     Max,
 }
 
-pub enum ProgTc {
+pub enum CallableProgTc {
     UpdateCache,
 
     Max,

@@ -12,8 +12,8 @@ use aya_log_ebpf::{debug, error, info};
 use core::mem;
 use core::slice;
 use memcached_ebpf_proxy_cache_common::{
-    CacheEntry, CacheUsageStatistics, ProgTc, ProgXdp, CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET,
-    MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
+    CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, CACHE_ENTRY_COUNT,
+    MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -59,10 +59,12 @@ static PARSING_CONTEXT: PerCpuArray<ParsingContext> = PerCpuArray::with_max_entr
 static CACHE_USAGE_STATS: PerCpuArray<CacheUsageStatistics> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
-static MAP_PROGS_XDP: ProgramArray = ProgramArray::with_max_entries(ProgXdp::Max as u32, 0);
+static MAP_CALLABLE_PROGS_XDP: ProgramArray =
+    ProgramArray::with_max_entries(CallableProgXdp::Max as u32, 0);
 
 #[map]
-static MAP_PROGS_TC: ProgramArray = ProgramArray::with_max_entries(ProgTc::Max as u32, 0);
+static MAP_CALLABLE_PROGS_TC: ProgramArray =
+    ProgramArray::with_max_entries(CallableProgTc::Max as u32, 0);
 
 pub enum CacheError {
     PacketOffsetOutofBounds,
@@ -233,12 +235,14 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
             .then_some(())
             .ok_or(CacheError::PacketOffsetOutofBounds)?;
 
-            unsafe { MAP_PROGS_XDP.tail_call(ctx, ProgXdp::HashKeys as u32) }
+            unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
                 .map_err(|_| CacheError::TailCallError)?;
         }
         (IpProto::Tcp, MEMCACHED_PORT, _) => {
-            unsafe { MAP_PROGS_XDP.tail_call(ctx, ProgXdp::InvalidateCache as u32) }
-                .map_err(|_| CacheError::TailCallError)?;
+            unsafe {
+                MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::InvalidateCache as u32)
+            }
+            .map_err(|_| CacheError::TailCallError)?;
         }
         _ => Err(CacheError::BadRequestPacket),
     }

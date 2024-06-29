@@ -287,7 +287,7 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
 }
 
 fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
-    let _payload_ptr: *const u8 = ptr_at(ctx, ctx.data()).ok_or(CacheError::BadRequestPacket)?;
+    let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
     let parsing_context = PARSING_CONTEXT
         .get_ptr_mut(0)
@@ -305,8 +305,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     // use MAX_KEY_LENGTH + 1 as upper bound to make it possible to detect if
     // key length is greater than MAX_KEY_LENGTH
-    while offset < MAX_KEY_LENGTH + 1
-        && ctx.data() + offset + mem::size_of::<u8>() <= ctx.data_end()
+    while offset < MAX_KEY_LENGTH + 1 && ctx.data() + offset + mem::size_of::<u8>() < ctx.data_end()
     {
         match unsafe { *((ctx.data() + offset) as *const u8) } {
             b'\r' => {

@@ -8,7 +8,7 @@ use aya_ebpf::{
     maps::{Array, PerCpuArray, ProgramArray},
     programs::XdpContext,
 };
-use aya_log_ebpf::info;
+use aya_log_ebpf::{debug, error, info};
 use core::mem;
 use core::slice;
 use memcached_ebpf_proxy_cache_common::{
@@ -65,11 +65,27 @@ static MAP_PROGS_XDP: ProgramArray = ProgramArray::with_max_entries(ProgXdp::Max
 static MAP_PROGS_TC: ProgramArray = ProgramArray::with_max_entries(ProgTc::Max as u32, 0);
 
 pub enum CacheError {
+    PacketOffsetOutofBounds,
     HeaderParseError,
     PtrSliceCoercionError,
     MapLookupError,
     BadRequestPacket,
     TailCallError,
+    UnsupportedProtocol,
+}
+
+impl AsRef<str> for CacheError {
+    fn as_ref(&self) -> &str {
+        match self {
+            CacheError::PacketOffsetOutofBounds => "CacheError::PacketOffsetOutofBounds",
+            CacheError::HeaderParseError => "CacheError::HeaderParseError",
+            CacheError::PtrSliceCoercionError => "CacheError::PtrSliceCoercionError",
+            CacheError::MapLookupError => "CacheError::MapLookupError",
+            CacheError::BadRequestPacket => "CacheError::BadRequestPacket",
+            CacheError::TailCallError => "CacheError::TailCallError",
+            CacheError::UnsupportedProtocol => "CacheError::UnsupportedProtocol",
+        }
+    }
 }
 
 impl From<CacheError> for u32 {
@@ -120,24 +136,27 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
     Some(unsafe { slice::from_raw_parts((start + offset) as *const T, slice_len) })
 }
 
-fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
-    info!(&ctx, "rx_filter: received a packet");
-
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0).ok_or(CacheError::HeaderParseError)?;
+fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
+    let ethhdr: *const EthHdr = ptr_at(ctx, 0).ok_or(CacheError::HeaderParseError)?;
 
     match unsafe { (*ethhdr).ether_type } {
         EtherType::Ipv4 => {}
-        _ => return Err(CacheError::HeaderParseError.into()),
+        _ => return Err(CacheError::HeaderParseError),
     }
 
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN).ok_or(CacheError::HeaderParseError)?;
+    let ipv4hdr: *const Ipv4Hdr = ptr_at(ctx, EthHdr::LEN).ok_or(CacheError::HeaderParseError)?;
 
     let protocol = unsafe { (*ipv4hdr).proto };
+
+    debug!(
+        ctx,
+        "rx_filter: recv Ipv4 packet with protocol: {}", protocol as u32
+    );
 
     let (dest, payload_offset) = match protocol {
         IpProto::Udp => {
             let udphdr: *const UdpHdr =
-                ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
+                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*udphdr).dest }),
                 EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + size_of::<MemcachedUdpHeader>(),
@@ -145,17 +164,22 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
         }
         IpProto::Tcp => {
             let tcphdr: *const TcpHdr =
-                ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
+                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*tcphdr).dest }),
                 EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN,
             )
         }
-        _ => return Err(0u32),
+        _ => return Err(CacheError::UnsupportedProtocol),
     };
 
+    debug!(
+        ctx,
+        "rx_filter: recv packet with dest: {}, payload_offset: {}", dest, payload_offset
+    );
+
     let first_4_bytes =
-        slice_at::<u8>(&ctx, payload_offset, 4).ok_or(CacheError::PtrSliceCoercionError)?;
+        slice_at::<u8>(ctx, payload_offset, 4).ok_or(CacheError::PtrSliceCoercionError)?;
 
     match (protocol, dest, first_4_bytes) {
         (IpProto::Udp, MEMCACHED_PORT, b"get ") => {
@@ -185,8 +209,10 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
                 pos += 1;
             }
 
+            debug!(ctx, "rx_filter: get packet keys begin at {}", pos);
+
             if pos >= MAX_PACKET_LENGTH {
-                return Err(CacheError::BadRequestPacket.into());
+                return Err(CacheError::BadRequestPacket);
             }
 
             unsafe {
@@ -205,24 +231,34 @@ fn try_rx_filter(ctx: XdpContext) -> Result<u32, u32> {
             }
             .eq(&0)
             .then_some(())
-            .ok_or(0u32)?;
+            .ok_or(CacheError::PacketOffsetOutofBounds)?;
 
-            unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::HashKeys as u32) }
+            unsafe { MAP_PROGS_XDP.tail_call(ctx, ProgXdp::HashKeys as u32) }
                 .map_err(|_| CacheError::TailCallError)?;
         }
         (IpProto::Tcp, MEMCACHED_PORT, _) => {
-            unsafe { MAP_PROGS_XDP.tail_call(&ctx, ProgXdp::InvalidateCache as u32) }
+            unsafe { MAP_PROGS_XDP.tail_call(ctx, ProgXdp::InvalidateCache as u32) }
                 .map_err(|_| CacheError::TailCallError)?;
         }
-        _ => Err(0u32),
+        _ => Err(CacheError::BadRequestPacket),
     }
 }
 
 #[xdp]
 pub fn rx_filter(ctx: XdpContext) -> u32 {
-    match try_rx_filter(ctx) {
-        Ok(ret) => ret,
-        Err(_) => xdp_action::XDP_PASS,
+    info!(&ctx, "rx_filter: received a packet");
+
+    match try_rx_filter(&ctx) {
+        Ok(ret) => {
+            info!(&ctx, "rx_filter: done processing packet, action: {}", ret);
+
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "rx_filter: Err({})", err.as_ref());
+
+            xdp_action::XDP_PASS
+        }
     }
 }
 

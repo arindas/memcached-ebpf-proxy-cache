@@ -139,6 +139,10 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
 }
 
 #[inline(always)]
+/// Returns the position of the first byte after skipping the first consecutive sequence of the given
+/// char in the current packet.
+///
+/// The position returned is guranteed to be within the provided upper bound and packet data end.
 pub fn skip_chars_in_packet(
     ctx: &XdpContext,
     start_pos: usize,

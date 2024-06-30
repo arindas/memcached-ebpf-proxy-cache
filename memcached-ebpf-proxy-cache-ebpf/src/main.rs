@@ -10,8 +10,7 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::{debug, error, info};
-use core::mem;
-use core::slice;
+use core::{mem, slice, sync::atomic};
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
     CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
@@ -315,13 +314,17 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 pub struct MemcachedKeyScan {
     pub reached_end_of_request: bool,
     pub key_hash: u32,
     pub key_len: usize,
     pub offset_after_scan: usize,
 }
+
+#[map]
+static MAP_MEMCACHED_KEY_SCANS: PerCpuArray<MemcachedKeyScan> =
+    PerCpuArray::with_max_entries(MAX_KEYS_IN_PACKET, 0);
 
 #[inline(always)]
 pub fn scan_memcached_key(
@@ -371,12 +374,22 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         .get_ptr_mut(unsafe { (*parsing_context).key_count })
         .ok_or(CacheError::MapLookupError)?;
 
+    let memcached_key_scan = MAP_MEMCACHED_KEY_SCANS
+        .get_ptr_mut(unsafe { (*parsing_context).key_count })
+        .ok_or(CacheError::MapLookupError)?;
+
+    // unsafe {
+    //     if (*memcached_key_scan).key_len == 0 {
+    //         *memcached_key_scan = scan_memcached_key(ctx, 0, MAX_KEY_LENGTH + 1)
+    //     }
+    // }
+
     let MemcachedKeyScan {
         reached_end_of_request,
         key_hash,
         key_len,
         offset_after_scan: mut offset,
-    } = scan_memcached_key(ctx, 0, MAX_KEY_LENGTH + 1);
+    } = unsafe { *memcached_key_scan };
 
     unsafe { (*memcached_key).hash = key_hash };
 
@@ -404,28 +417,34 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         .get_ptr_mut(cache_idx)
         .ok_or(CacheError::MapLookupError)?;
 
-    // unsafe { bpf_spin_lock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
+    // let flag = unsafe { (*cache_entry).flag.load(atomic::Ordering::Relaxed) };
 
-    if unsafe { (*cache_entry).valid != 0 && (*cache_entry).hash == (*memcached_key).hash } {
-        // unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
+    // if flag != 0 {
+    //     unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
+    //         .map_err(|_| CacheError::TailCallError)?;
+    // } else {
+    //     unsafe { (*cache_entry).flag.store(1, atomic::Ordering::Relaxed) };
+    // }
 
+    if unsafe { (*cache_entry).valid && (*cache_entry).hash == (*memcached_key).hash } {
         let key = conservative_slice_at::<u8>(ctx, 0, key_len)
             .ok_or(CacheError::PtrSliceCoercionError)?;
 
         unsafe {
             (*memcached_key).data.copy_from_slice(key);
             (*memcached_key).len = key.len() as u32;
+            (*memcached_key_scan).key_len = 0;
             (*parsing_context).key_count += 1;
         }
     } else {
-        // unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
-
         let cache_usage_stats = CACHE_USAGE_STATS
             .get_ptr_mut(0)
             .ok_or(CacheError::MapLookupError)?;
 
         unsafe { (*cache_usage_stats).miss_count += 1 };
     }
+
+    // unsafe { (*cache_entry).flag.store(0, atomic::Ordering::Relaxed) };
 
     if reached_end_of_request {
         // pop headers + "get " + previous keys

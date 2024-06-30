@@ -60,7 +60,7 @@ impl Hasher for Fnv1AHasher {
 pub struct CacheEntry {
     pub flag: AtomicU64,
     pub len: u32,
-    pub valid: u8,
+    pub valid: bool,
     pub hash: u32,
     pub data: [u8; MAX_CACHE_DATA_SIZE],
 }

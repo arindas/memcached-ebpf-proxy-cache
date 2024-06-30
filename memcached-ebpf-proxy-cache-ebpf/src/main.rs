@@ -185,11 +185,12 @@ pub fn skip_chars_in_packet(
 ) -> usize {
     let mut pos = start_pos;
 
-    while pos < pos_upper_bound
-        && ctx.data() + pos + mem::size_of::<u8>() <= ctx.data_end()
-        && unsafe { *((ctx.data() + pos) as *const u8) } == skip_char
-    {
-        pos += 1;
+    while let Some(x) = ptr_at::<u8>(ctx, pos) {
+        if pos < pos_upper_bound && unsafe { *x } == skip_char {
+            pos += 1;
+        } else {
+            break;
+        }
     }
 
     pos

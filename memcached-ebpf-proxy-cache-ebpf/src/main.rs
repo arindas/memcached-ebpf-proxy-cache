@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
+#![feature(asm_experimental_arch)]
 
+use aya_ebpf::helpers::bpf_get_prandom_u32;
 #[allow(unused)]
 use aya_ebpf::{
     bindings::{bpf_spin_lock, xdp_action},
@@ -10,7 +12,7 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::{debug, error, info};
-use core::{mem, slice, sync::atomic};
+use core::{mem, slice};
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
     CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
@@ -378,11 +380,11 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         .get_ptr_mut(unsafe { (*parsing_context).key_count })
         .ok_or(CacheError::MapLookupError)?;
 
-    // unsafe {
-    //     if (*memcached_key_scan).key_len == 0 {
-    //         *memcached_key_scan = scan_memcached_key(ctx, 0, MAX_KEY_LENGTH + 1)
-    //     }
-    // }
+    unsafe {
+        if (*memcached_key_scan).key_len == 0 {
+            *memcached_key_scan = scan_memcached_key(ctx, 0, MAX_KEY_LENGTH + 1)
+        }
+    }
 
     let MemcachedKeyScan {
         reached_end_of_request,
@@ -413,18 +415,25 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_idx = unsafe { (*memcached_key).hash } % CACHE_ENTRY_COUNT;
 
+    let token = unsafe { bpf_get_prandom_u32() };
+
     let cache_entry = MAP_KCACHE
         .get_ptr_mut(cache_idx)
         .ok_or(CacheError::MapLookupError)?;
 
-    // let flag = unsafe { (*cache_entry).flag.load(atomic::Ordering::Relaxed) };
+    let cache_entry_token_mut_ref = unsafe { &mut (*cache_entry).token };
 
-    // if flag != 0 {
-    //     unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
-    //         .map_err(|_| CacheError::TailCallError)?;
-    // } else {
-    //     unsafe { (*cache_entry).flag.store(1, atomic::Ordering::Relaxed) };
-    // }
+    if *cache_entry_token_mut_ref == 0 {
+        *cache_entry_token_mut_ref = token;
+    } else {
+        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
+            .map_err(|_| CacheError::TailCallError)?;
+    }
+
+    if *cache_entry_token_mut_ref != token {
+        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
+            .map_err(|_| CacheError::TailCallError)?;
+    }
 
     if unsafe { (*cache_entry).valid && (*cache_entry).hash == (*memcached_key).hash } {
         let key = conservative_slice_at::<u8>(ctx, 0, key_len)
@@ -444,7 +453,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         unsafe { (*cache_usage_stats).miss_count += 1 };
     }
 
-    // unsafe { (*cache_entry).flag.store(0, atomic::Ordering::Relaxed) };
+    *cache_entry_token_mut_ref = 0;
 
     if reached_end_of_request {
         // pop headers + "get " + previous keys

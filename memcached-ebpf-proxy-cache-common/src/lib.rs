@@ -1,6 +1,6 @@
 #![no_std]
 
-use core::{iter, sync::atomic::AtomicU64};
+use core::iter;
 
 pub const MAX_KEY_LENGTH: usize = 250;
 pub const MAX_VAL_LENGTH: usize = 1000;
@@ -58,7 +58,7 @@ impl Hasher for Fnv1AHasher {
 
 #[repr(C)]
 pub struct CacheEntry {
-    pub flag: AtomicU64,
+    pub token: u32,
     pub len: u32,
     pub valid: bool,
     pub hash: u32,

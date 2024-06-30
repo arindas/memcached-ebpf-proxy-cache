@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+#[allow(unused)]
 use aya_ebpf::{
     bindings::{bpf_spin_lock, xdp_action},
     helpers::{bpf_spin_lock, bpf_spin_unlock, bpf_xdp_adjust_head},
@@ -120,9 +121,9 @@ pub fn compute_ip_checksum(ip: *const Ipv4Hdr) -> u16 {
 pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
     let start = ctx.data();
     let end = ctx.data_end();
-    let len = mem::size_of::<T>();
+    let item_len = mem::size_of::<T>();
 
-    if start + offset + len > end {
+    if start + offset + item_len > end {
         return None;
     }
 
@@ -133,9 +134,9 @@ pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
 pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<&[T]> {
     let start = ctx.data();
     let end = ctx.data_end();
-    let len = mem::size_of::<T>();
+    let item_len = mem::size_of::<T>();
 
-    if start + offset + slice_len * len > end {
+    if start + offset + slice_len * item_len > end {
         return None;
     }
 
@@ -143,10 +144,38 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
 }
 
 #[inline(always)]
+pub fn conservative_ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
+    let start = ctx.data();
+    let end = ctx.data_end();
+    let item_len = mem::size_of::<T>();
+
+    if start + offset + item_len >= end {
+        return None;
+    }
+
+    Some((start + offset) as *const T)
+}
+
+#[inline(always)]
+pub fn conservative_slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<&[T]> {
+    let start = ctx.data();
+    let end = ctx.data_end();
+    let item_len = mem::size_of::<T>();
+
+    let slice_len = slice_len - 1;
+
+    if start + offset + slice_len * item_len >= end {
+        return None;
+    }
+
+    Some(unsafe { slice::from_raw_parts((start + offset) as *const T, slice_len) })
+}
+
 /// Returns the position of the first byte after skipping the first consecutive sequence of the given
 /// char in the current packet.
 ///
 /// The position returned is guranteed to be within the provided upper bound and packet data end.
+#[inline(always)]
 pub fn skip_chars_in_packet(
     ctx: &XdpContext,
     start_pos: usize,
@@ -305,17 +334,16 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     // use MAX_KEY_LENGTH + 1 as upper bound to make it possible to detect if
     // key length is greater than MAX_KEY_LENGTH
-    while offset < MAX_KEY_LENGTH + 1 && ctx.data() + offset + mem::size_of::<u8>() < ctx.data_end()
-    {
-        match unsafe { *((ctx.data() + offset) as *const u8) } {
-            b'\r' => {
+    while let Some(x) = conservative_ptr_at::<u8>(ctx, offset) {
+        match (offset < MAX_KEY_LENGTH + 1, unsafe { *x }) {
+            (true, b'\r') => {
                 done_parsing = true;
                 break;
             }
 
-            b' ' => break,
+            (true, b' ') | (false, _) => break,
 
-            byte => {
+            (true, byte) => {
                 hasher.write_byte(byte);
                 key_len += 1;
             }
@@ -350,21 +378,20 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         .get_ptr_mut(cache_idx)
         .ok_or(CacheError::MapLookupError)?;
 
-    unsafe {
-        bpf_spin_lock(&mut (*cache_entry).lock as *mut bpf_spin_lock);
-    }
+    // unsafe { bpf_spin_lock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
 
     if unsafe { (*cache_entry).valid != 0 && (*cache_entry).hash == (*memcached_key).hash } {
-        unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
+        // unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
 
-        let key = slice_at::<u8>(ctx, 0, key_len).ok_or(CacheError::PtrSliceCoercionError)?;
+        let key = conservative_slice_at::<u8>(ctx, 0, key_len)
+            .ok_or(CacheError::PtrSliceCoercionError)?;
 
         unsafe {
             (*memcached_key).data.copy_from_slice(key);
             (*parsing_context).key_count += 1;
         }
     } else {
-        unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
+        // unsafe { bpf_spin_unlock(&mut (*cache_entry).lock as *mut bpf_spin_lock) };
 
         let cache_usage_stats = CACHE_USAGE_STATS
             .get_ptr_mut(0)

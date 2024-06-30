@@ -315,6 +315,50 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
     }
 }
 
+#[derive(Default)]
+pub struct MemcachedKeyScan {
+    pub reached_end_of_request: bool,
+    pub key_hash: u32,
+    pub key_len: usize,
+    pub offset_after_scan: usize,
+}
+
+#[inline(always)]
+pub fn scan_memcached_key(
+    ctx: &XdpContext,
+    mut offset: usize,
+    key_len_upper_bound: usize,
+) -> MemcachedKeyScan {
+    let mut memcached_key_scan = MemcachedKeyScan::default();
+
+    let mut hasher = Fnv1AHasher::new();
+
+    while let Some(x) = conservative_ptr_at::<u8>(ctx, offset) {
+        match (memcached_key_scan.key_len < key_len_upper_bound, unsafe {
+            *x
+        }) {
+            (true, b'\r') => {
+                memcached_key_scan.reached_end_of_request = true;
+                break;
+            }
+
+            (true, b' ') | (false, _) => break,
+
+            (true, byte) => {
+                hasher.write_byte(byte);
+                memcached_key_scan.key_len += 1;
+            }
+        }
+
+        offset += 1;
+    }
+
+    memcached_key_scan.key_hash = hasher.finish();
+    memcached_key_scan.offset_after_scan = offset;
+
+    memcached_key_scan
+}
+
 // TODO: redesign to not require locks
 fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
     let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
@@ -327,33 +371,14 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         .get_ptr_mut(unsafe { (*parsing_context).key_count })
         .ok_or(CacheError::MapLookupError)?;
 
-    let mut hasher = Fnv1AHasher::new();
+    let MemcachedKeyScan {
+        reached_end_of_request,
+        key_hash,
+        key_len,
+        offset_after_scan: mut offset,
+    } = scan_memcached_key(ctx, 0, MAX_KEY_LENGTH + 1);
 
-    let mut offset = 0;
-    let mut done_parsing = false;
-    let mut key_len = 0;
-
-    // use MAX_KEY_LENGTH + 1 as upper bound to make it possible to detect if
-    // key length is greater than MAX_KEY_LENGTH
-    while let Some(x) = conservative_ptr_at::<u8>(ctx, offset) {
-        match (offset < MAX_KEY_LENGTH + 1, unsafe { *x }) {
-            (true, b'\r') => {
-                done_parsing = true;
-                break;
-            }
-
-            (true, b' ') | (false, _) => break,
-
-            (true, byte) => {
-                hasher.write_byte(byte);
-                key_len += 1;
-            }
-        }
-
-        offset += 1;
-    }
-
-    unsafe { (*memcached_key).hash = hasher.finish() };
+    unsafe { (*memcached_key).hash = key_hash };
 
     if key_len == 0 || key_len > MAX_KEY_LENGTH {
         unsafe {
@@ -402,9 +427,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         unsafe { (*cache_usage_stats).miss_count += 1 };
     }
 
-    if done_parsing {
-        // reached end of request
-
+    if reached_end_of_request {
         // pop headers + "get " + previous keys
         unsafe {
             bpf_xdp_adjust_head(

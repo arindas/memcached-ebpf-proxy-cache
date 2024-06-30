@@ -1,7 +1,6 @@
 #![no_std]
 
-use aya_ebpf::bindings::bpf_spin_lock;
-use core::iter;
+use core::{iter, sync::atomic::AtomicU64};
 
 pub const MAX_KEY_LENGTH: usize = 250;
 pub const MAX_VAL_LENGTH: usize = 1000;
@@ -59,7 +58,7 @@ impl Hasher for Fnv1AHasher {
 
 #[repr(C)]
 pub struct CacheEntry {
-    pub lock: bpf_spin_lock,
+    pub flag: AtomicU64,
     pub len: u32,
     pub valid: u8,
     pub hash: u32,

@@ -315,6 +315,7 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
     }
 }
 
+// TODO: redesign to not require locks
 fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
     let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
@@ -388,6 +389,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
         unsafe {
             (*memcached_key).data.copy_from_slice(key);
+            (*memcached_key).len = key_len as u32;
             (*parsing_context).key_count += 1;
         }
     } else {

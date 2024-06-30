@@ -389,7 +389,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
         unsafe {
             (*memcached_key).data.copy_from_slice(key);
-            (*memcached_key).len = key_len as u32;
+            (*memcached_key).len = key.len() as u32;
             (*parsing_context).key_count += 1;
         }
     } else {

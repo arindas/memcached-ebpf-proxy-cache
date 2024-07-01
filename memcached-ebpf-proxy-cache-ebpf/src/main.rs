@@ -3,16 +3,15 @@
 #![allow(internal_features)]
 #![feature(core_intrinsics)]
 
-#[allow(unused)]
 use aya_ebpf::{
-    bindings::{bpf_spin_lock, xdp_action},
-    helpers::{bpf_spin_lock, bpf_spin_unlock, bpf_xdp_adjust_head},
+    bindings::xdp_action,
+    helpers::bpf_xdp_adjust_head,
     macros::{map, xdp},
     maps::{Array, PerCpuArray, ProgramArray},
     programs::XdpContext,
 };
 use aya_log_ebpf::{debug, error, info};
-use core::intrinsics::{atomic_xadd_relaxed, atomic_xchg_seqcst};
+use core::intrinsics::atomic_xchg_seqcst;
 use core::{mem, slice};
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,

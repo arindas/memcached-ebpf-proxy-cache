@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::helpers::bpf_get_prandom_u32;
 #[allow(unused)]
 use aya_ebpf::{
     bindings::{bpf_spin_lock, xdp_action},
@@ -415,22 +414,15 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_idx = unsafe { (*memcached_key).hash } % CACHE_ENTRY_COUNT;
 
-    let token = unsafe { bpf_get_prandom_u32() };
-
     let cache_entry = MAP_KCACHE
         .get_ptr_mut(cache_idx)
         .ok_or(CacheError::MapLookupError)?;
 
-    let cache_entry_token_mut_ref = unsafe { &mut (*cache_entry).token };
+    let cache_entry_lock_mut_ref = unsafe { &mut (*cache_entry).lock };
 
-    if *cache_entry_token_mut_ref == 0 {
-        *cache_entry_token_mut_ref = token;
+    if *cache_entry_lock_mut_ref == 0 {
+        *cache_entry_lock_mut_ref = 1;
     } else {
-        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
-            .map_err(|_| CacheError::TailCallError)?;
-    }
-
-    if *cache_entry_token_mut_ref != token {
         unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
             .map_err(|_| CacheError::TailCallError)?;
     }
@@ -453,7 +445,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
         unsafe { (*cache_usage_stats).miss_count += 1 };
     }
 
-    *cache_entry_token_mut_ref = 0;
+    *cache_entry_lock_mut_ref = 0;
 
     if reached_end_of_request {
         // pop headers + "get " + previous keys

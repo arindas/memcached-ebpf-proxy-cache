@@ -415,7 +415,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_idx = unsafe { (*memcached_key).hash } % CACHE_ENTRY_COUNT;
 
-    let token = unsafe { bpf_get_prandom_u32() };
+    let token = unsafe { bpf_get_prandom_u32() } as u64;
 
     let cache_entry = MAP_KCACHE
         .get_ptr_mut(cache_idx)

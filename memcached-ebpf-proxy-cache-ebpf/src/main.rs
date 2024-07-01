@@ -428,8 +428,12 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_entry_lock_mut_ref = unsafe { &mut (*cache_entry).lock };
 
+    let read_val = unsafe { atomic_xadd_relaxed(cache_entry_lock_mut_ref as *mut u32, 1) };
+
+    let lock_acquired = false;
+
     unsafe {
-        if atomic_xadd_relaxed(cache_entry_lock_mut_ref as *mut u32, 1) > 0 {
+        if !lock_acquired {
             if lock_retry > MAX_LOCK_RETRY_LIMIT {
                 bpf_xdp_adjust_head(
                     ctx.ctx,

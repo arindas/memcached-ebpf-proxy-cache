@@ -428,6 +428,8 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
     }
 
     if unsafe { (*cache_entry).valid && (*cache_entry).hash == (*memcached_key).hash } {
+        *cache_entry_lock_mut_ref = 0;
+
         let key = conservative_slice_at::<u8>(ctx, 0, key_len)
             .ok_or(CacheError::PtrSliceCoercionError)?;
 
@@ -438,14 +440,14 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
             (*parsing_context).key_count += 1;
         }
     } else {
+        *cache_entry_lock_mut_ref = 0;
+
         let cache_usage_stats = CACHE_USAGE_STATS
             .get_ptr_mut(0)
             .ok_or(CacheError::MapLookupError)?;
 
         unsafe { (*cache_usage_stats).miss_count += 1 };
     }
-
-    *cache_entry_lock_mut_ref = 0;
 
     if reached_end_of_request {
         // pop headers + "get " + previous keys

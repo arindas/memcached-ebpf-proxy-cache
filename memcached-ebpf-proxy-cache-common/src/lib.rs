@@ -58,7 +58,7 @@ impl Hasher for Fnv1AHasher {
 
 #[repr(C)]
 pub struct CacheEntry {
-    pub token: u64,
+    pub token: u32,
     pub len: u32,
     pub valid: bool,
     pub hash: u32,

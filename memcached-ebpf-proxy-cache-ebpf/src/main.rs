@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(asm_experimental_arch)]
 
 use aya_ebpf::helpers::bpf_get_prandom_u32;
 #[allow(unused)]

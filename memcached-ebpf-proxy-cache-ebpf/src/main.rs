@@ -1,5 +1,7 @@
 #![no_std]
 #![no_main]
+#![allow(internal_features)]
+#![feature(core_intrinsics)]
 
 #[allow(unused)]
 use aya_ebpf::{
@@ -10,10 +12,12 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::{debug, error, info};
+use core::intrinsics::atomic_xadd_relaxed;
 use core::{mem, slice};
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
-    CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH, MEMCACHED_PORT,
+    CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_LOCK_RETRY_LIMIT, MAX_PACKET_LENGTH,
+    MEMCACHED_PORT,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -76,6 +80,7 @@ pub enum CacheError {
     UnsupportedProtocol,
     UnexpectedKeyLen,
     UnexpectedValLen,
+    LockRetryLimitHit,
 }
 
 impl AsRef<str> for CacheError {
@@ -90,6 +95,7 @@ impl AsRef<str> for CacheError {
             CacheError::UnsupportedProtocol => "CacheError::UnsupportedProtocol",
             CacheError::UnexpectedKeyLen => "CacheError::UnexpectedKeyLen",
             CacheError::UnexpectedValLen => "CacheError::UnexpectedValLen",
+            CacheError::LockRetryLimitHit => "CacheError::LockRetryLimitHit",
         }
     }
 }
@@ -318,6 +324,7 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
 #[derive(Default, Clone, Copy)]
 pub struct MemcachedKeyScan {
     pub reached_end_of_request: bool,
+    pub lock_retry: u32,
     pub key_hash: u32,
     pub key_len: usize,
     pub offset_after_scan: usize,
@@ -387,6 +394,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let MemcachedKeyScan {
         reached_end_of_request,
+        lock_retry,
         key_hash,
         key_len,
         offset_after_scan: mut offset,
@@ -420,12 +428,34 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_entry_lock_mut_ref = unsafe { &mut (*cache_entry).lock };
 
-    if *cache_entry_lock_mut_ref == 0 {
-        *cache_entry_lock_mut_ref = 1;
-    } else {
-        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
-            .map_err(|_| CacheError::TailCallError)?;
+    unsafe {
+        if atomic_xadd_relaxed(cache_entry_lock_mut_ref as *mut u32, 1) > 0 {
+            if lock_retry > MAX_LOCK_RETRY_LIMIT {
+                bpf_xdp_adjust_head(
+                    ctx.ctx,
+                    0 - (EthHdr::LEN
+                        + Ipv4Hdr::LEN
+                        + UdpHdr::LEN
+                        + size_of::<MemcachedUdpHeader>()
+                        + (*parsing_context).read_packet_offset as usize)
+                        as i32,
+                )
+                .eq(&0)
+                .then_some(())
+                .ok_or(CacheError::PacketOffsetOutofBounds)?;
+
+                return Err(CacheError::LockRetryLimitHit);
+            }
+
+            (*memcached_key_scan).lock_retry += 1;
+
+            MAP_CALLABLE_PROGS_XDP
+                .tail_call(ctx, CallableProgXdp::HashKeys as u32)
+                .map_err(|_| CacheError::TailCallError)?;
+        }
     }
+
+    unsafe { (*memcached_key_scan).lock_retry = 0 };
 
     if unsafe { (*cache_entry).valid && (*cache_entry).hash == (*memcached_key).hash } {
         *cache_entry_lock_mut_ref = 0;

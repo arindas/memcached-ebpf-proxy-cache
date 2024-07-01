@@ -19,6 +19,8 @@ pub const FNV_PRIME_32: u32 = 16777619;
 
 pub const MEMCACHED_PORT: u16 = 11211;
 
+pub const MAX_LOCK_RETRY_LIMIT: u32 = 3;
+
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
 

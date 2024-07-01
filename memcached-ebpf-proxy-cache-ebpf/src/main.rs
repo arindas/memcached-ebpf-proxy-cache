@@ -12,7 +12,7 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::{debug, error, info};
-use core::intrinsics::atomic_xadd_relaxed;
+use core::intrinsics::{atomic_xadd_relaxed, atomic_xchg_seqcst};
 use core::{mem, slice};
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
@@ -428,12 +428,8 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_entry_lock_mut_ref = unsafe { &mut (*cache_entry).lock };
 
-    let read_val = unsafe { atomic_xadd_relaxed(cache_entry_lock_mut_ref as *mut u32, 1) };
-
-    let lock_acquired = false;
-
     unsafe {
-        if !lock_acquired {
+        if atomic_xchg_seqcst(cache_entry_lock_mut_ref as *mut u64, 1) != 0 {
             if lock_retry > MAX_LOCK_RETRY_LIMIT {
                 bpf_xdp_adjust_head(
                     ctx.ctx,
@@ -462,7 +458,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
     unsafe { (*memcached_key_scan).lock_retry = 0 };
 
     if unsafe { (*cache_entry).valid && (*cache_entry).hash == (*memcached_key).hash } {
-        *cache_entry_lock_mut_ref = 0;
+        unsafe { atomic_xchg_seqcst(cache_entry_lock_mut_ref as *mut u64, 0) };
 
         let key = conservative_slice_at::<u8>(ctx, 0, key_len)
             .ok_or(CacheError::PtrSliceCoercionError)?;
@@ -474,7 +470,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
             (*parsing_context).key_count += 1;
         }
     } else {
-        *cache_entry_lock_mut_ref = 0;
+        unsafe { atomic_xchg_seqcst(cache_entry_lock_mut_ref as *mut u64, 0) };
 
         let cache_usage_stats = CACHE_USAGE_STATS
             .get_ptr_mut(0)

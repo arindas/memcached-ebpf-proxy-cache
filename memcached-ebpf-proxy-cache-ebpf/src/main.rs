@@ -15,8 +15,8 @@ use core::intrinsics::atomic_xchg_seqcst;
 use core::{mem, slice};
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
-    CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_LOCK_RETRY_LIMIT, MAX_PACKET_LENGTH,
-    MEMCACHED_PORT,
+    CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH,
+    MAX_TAIL_CALL_LOCK_RETRY_LIMIT, MEMCACHED_PORT,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -369,8 +369,27 @@ pub fn scan_memcached_key(
     memcached_key_scan
 }
 
-// TODO: redesign to not require locks
-fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
+#[inline(always)]
+fn try_cache_reset_xdp_head_offset(
+    ctx: &XdpContext,
+    read_packet_offset: u16,
+) -> Result<(), CacheError> {
+    unsafe {
+        bpf_xdp_adjust_head(
+            ctx.ctx,
+            0 - (EthHdr::LEN
+                + Ipv4Hdr::LEN
+                + UdpHdr::LEN
+                + size_of::<MemcachedUdpHeader>()
+                + read_packet_offset as usize) as i32,
+        )
+    }
+    .eq(&0)
+    .then_some(())
+    .ok_or(CacheError::PacketOffsetOutofBounds)
+}
+
+fn try_hash_keys_with_spin_tail_call_lock(ctx: &XdpContext) -> Result<u32, CacheError> {
     let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
     let parsing_context = PARSING_CONTEXT
@@ -402,19 +421,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
     unsafe { (*memcached_key).hash = key_hash };
 
     if key_len == 0 || key_len > MAX_KEY_LENGTH {
-        unsafe {
-            bpf_xdp_adjust_head(
-                ctx.ctx,
-                0 - (EthHdr::LEN
-                    + Ipv4Hdr::LEN
-                    + UdpHdr::LEN
-                    + size_of::<MemcachedUdpHeader>()
-                    + (*parsing_context).read_packet_offset as usize) as i32,
-            )
-        }
-        .eq(&0)
-        .then_some(())
-        .ok_or(CacheError::PacketOffsetOutofBounds)?;
+        try_cache_reset_xdp_head_offset(ctx, unsafe { (*parsing_context).read_packet_offset })?;
 
         return Err(CacheError::UnexpectedKeyLen);
     }
@@ -429,19 +436,8 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     unsafe {
         if atomic_xchg_seqcst(cache_entry_lock_mut_ref as *mut u64, 1) != 0 {
-            if lock_retry > MAX_LOCK_RETRY_LIMIT {
-                bpf_xdp_adjust_head(
-                    ctx.ctx,
-                    0 - (EthHdr::LEN
-                        + Ipv4Hdr::LEN
-                        + UdpHdr::LEN
-                        + size_of::<MemcachedUdpHeader>()
-                        + (*parsing_context).read_packet_offset as usize)
-                        as i32,
-                )
-                .eq(&0)
-                .then_some(())
-                .ok_or(CacheError::PacketOffsetOutofBounds)?;
+            if lock_retry > MAX_TAIL_CALL_LOCK_RETRY_LIMIT {
+                try_cache_reset_xdp_head_offset(ctx, (*parsing_context).read_packet_offset)?;
 
                 return Err(CacheError::LockRetryLimitHit);
             }
@@ -480,19 +476,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     if reached_end_of_request {
         // pop headers + "get " + previous keys
-        unsafe {
-            bpf_xdp_adjust_head(
-                ctx.ctx,
-                0 - (EthHdr::LEN
-                    + Ipv4Hdr::LEN
-                    + UdpHdr::LEN
-                    + size_of::<MemcachedUdpHeader>()
-                    + (*parsing_context).read_packet_offset as usize) as i32,
-            )
-        }
-        .eq(&0)
-        .then_some(())
-        .ok_or(CacheError::PacketOffsetOutofBounds)?;
+        try_cache_reset_xdp_head_offset(ctx, unsafe { (*parsing_context).read_packet_offset })?;
 
         if unsafe { (*parsing_context).key_count > 0 } {
             unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::PreparePacket as u32) }
@@ -521,7 +505,7 @@ fn try_hash_keys(ctx: &XdpContext) -> Result<u32, CacheError> {
 pub fn hash_keys(ctx: XdpContext) -> u32 {
     info!(&ctx, "hash_keys: received a packet");
 
-    match try_hash_keys(&ctx) {
+    match try_hash_keys_with_spin_tail_call_lock(&ctx) {
         Ok(ret) => {
             info!(&ctx, "hash_keys: done processing packet, action: {}", ret);
 

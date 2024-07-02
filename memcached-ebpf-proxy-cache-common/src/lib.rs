@@ -21,6 +21,8 @@ pub const MEMCACHED_PORT: u16 = 11211;
 
 pub const MAX_TAIL_CALL_LOCK_RETRY_LIMIT: u32 = 3;
 
+pub const MAX_SPIN_LOCK_ITER_RETRY_LIMIT: u32 = 1000;
+
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
 

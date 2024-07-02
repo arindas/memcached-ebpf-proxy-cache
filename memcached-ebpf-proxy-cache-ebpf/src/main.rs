@@ -16,7 +16,7 @@ use core::{mem, slice};
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
     CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH,
-    MAX_TAIL_CALL_LOCK_RETRY_LIMIT, MEMCACHED_PORT,
+    MAX_SPIN_LOCK_ITER_RETRY_LIMIT, MAX_TAIL_CALL_LOCK_RETRY_LIMIT, MEMCACHED_PORT,
 };
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -389,6 +389,7 @@ fn try_cache_reset_xdp_head_offset(
     .ok_or(CacheError::PacketOffsetOutofBounds)
 }
 
+#[allow(unused)]
 fn try_hash_keys_with_spin_tail_call_lock(ctx: &XdpContext) -> Result<u32, CacheError> {
     let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
@@ -501,11 +502,118 @@ fn try_hash_keys_with_spin_tail_call_lock(ctx: &XdpContext) -> Result<u32, Cache
     Ok(xdp_action::XDP_PASS)
 }
 
+fn try_spin_lock_acquire(lock: &mut u64, retry_limit: u32) -> Result<(), u32> {
+    let mut retries = 0;
+
+    while retries < retry_limit {
+        if unsafe { atomic_xchg_seqcst(lock as *mut u64, 1) } != 0 {
+            retries += 1;
+        } else {
+            break;
+        }
+    }
+
+    (retries < retry_limit).then_some(()).ok_or(retries)
+}
+
+fn spin_lock_release(lock: &mut u64) {
+    unsafe { atomic_xchg_seqcst(lock as *mut u64, 0) };
+}
+
+fn try_hash_keys_with_spin_iter_lock(ctx: &XdpContext) -> Result<u32, CacheError> {
+    let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
+
+    let parsing_context = PARSING_CONTEXT
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let memcached_key = MAP_KEYS
+        .get_ptr_mut(unsafe { (*parsing_context).key_count })
+        .ok_or(CacheError::MapLookupError)?;
+
+    let MemcachedKeyScan {
+        reached_end_of_request,
+        key_hash,
+        key_len,
+        offset_after_scan: mut offset,
+        ..
+    } = scan_memcached_key(ctx, 0, MAX_KEY_LENGTH + 1);
+
+    unsafe { (*memcached_key).hash = key_hash };
+
+    if key_len == 0 || key_len > MAX_KEY_LENGTH {
+        try_cache_reset_xdp_head_offset(ctx, unsafe { (*parsing_context).read_packet_offset })?;
+
+        return Err(CacheError::UnexpectedKeyLen);
+    }
+
+    let cache_idx = unsafe { (*memcached_key).hash } % CACHE_ENTRY_COUNT;
+
+    let cache_entry = MAP_KCACHE
+        .get_ptr_mut(cache_idx)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let cache_entry_lock_mut_ref = unsafe { &mut (*cache_entry).lock };
+
+    try_spin_lock_acquire(cache_entry_lock_mut_ref, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+        .map_err(|_| CacheError::LockRetryLimitHit)?;
+
+    if unsafe { (*cache_entry).valid && (*cache_entry).hash == (*memcached_key).hash } {
+        spin_lock_release(cache_entry_lock_mut_ref);
+
+        let key = conservative_slice_at::<u8>(ctx, 0, key_len)
+            .ok_or(CacheError::PtrSliceCoercionError)?;
+
+        unsafe {
+            (*memcached_key).data.copy_from_slice(key);
+            (*memcached_key).len = key.len() as u32;
+            (*parsing_context).key_count += 1;
+        }
+    } else {
+        spin_lock_release(cache_entry_lock_mut_ref);
+
+        let cache_usage_stats = CACHE_USAGE_STATS
+            .get_ptr_mut(0)
+            .ok_or(CacheError::MapLookupError)?;
+
+        unsafe { (*cache_usage_stats).miss_count += 1 };
+    }
+
+    if reached_end_of_request {
+        // pop headers + "get " + previous keys
+        try_cache_reset_xdp_head_offset(ctx, unsafe { (*parsing_context).read_packet_offset })?;
+
+        unsafe {
+            if (*parsing_context).key_count > 0 {
+                MAP_CALLABLE_PROGS_XDP
+                    .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
+                    .map_err(|_| CacheError::TailCallError)?;
+            }
+        }
+    } else {
+        // more keys to process
+
+        // move offset to start of next key
+        offset += 1;
+        unsafe { (*parsing_context).read_packet_offset += offset as u16 };
+
+        unsafe { bpf_xdp_adjust_head(ctx.ctx, offset as i32) } // push previous key
+            .eq(&0)
+            .then_some(())
+            .ok_or(CacheError::PacketOffsetOutofBounds)?;
+
+        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::HashKeys as u32) }
+            .map_err(|_| CacheError::TailCallError)?;
+    }
+
+    Ok(xdp_action::XDP_PASS)
+}
+
 #[xdp]
 pub fn hash_keys(ctx: XdpContext) -> u32 {
     info!(&ctx, "hash_keys: received a packet");
 
-    match try_hash_keys_with_spin_tail_call_lock(&ctx) {
+    match try_hash_keys_with_spin_iter_lock(&ctx) {
         Ok(ret) => {
             info!(&ctx, "hash_keys: done processing packet, action: {}", ret);
 

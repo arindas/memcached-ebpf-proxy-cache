@@ -244,6 +244,8 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
     let first_4_bytes =
         slice_at::<u8>(ctx, payload_offset, 4).ok_or(CacheError::PtrSliceCoercionError)?;
 
+    debug!(ctx, "rx_filter: first_4_bytes[0] = {}", first_4_bytes[0]);
+
     match (protocol, dest, first_4_bytes) {
         (IpProto::Udp, MEMCACHED_PORT, b"get ") => {
             let cache_usage_stats = CACHE_USAGE_STATS

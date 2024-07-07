@@ -18,7 +18,11 @@ fn memcache_get_set_consistency() {
         MEMCACHED_SET_PROTOCOL, MEMCACHED_HOST, MEMCACHED_PORT
     );
 
-    let _get_client = memcache::connect(memcached_get_endpoint).unwrap();
+    let get_client = memcache::connect(memcached_get_endpoint).unwrap();
 
-    let _set_client = memcache::connect(memcached_set_endpoint).unwrap();
+    let set_client = memcache::connect(memcached_set_endpoint).unwrap();
+
+    set_client.set("foo", "bar", 10).unwrap();
+
+    assert_eq!(get_client.get::<String>("foo").unwrap().unwrap(), "bar");
 }

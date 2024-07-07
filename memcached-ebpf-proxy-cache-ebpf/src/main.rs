@@ -4,7 +4,7 @@
 #![feature(core_intrinsics)]
 
 use aya_ebpf::{
-    bindings::{xdp_action, TC_ACT_PIPE},
+    bindings::xdp_action,
     helpers::bpf_xdp_adjust_head,
     macros::{map, xdp},
     maps::{Array, PerCpuArray, ProgramArray},
@@ -68,30 +68,6 @@ static MAP_CALLABLE_PROGS_XDP: ProgramArray =
 #[map]
 static MAP_CALLABLE_PROGS_TC: ProgramArray =
     ProgramArray::with_max_entries(CallableProgTc::Max as u32, 0);
-
-#[map]
-static CACHE_ERROR_XDP_ACTION: Array<Option<u32>> = Array::with_max_entries(1, 0);
-
-#[map]
-static CACHE_ERROR_TC_ACTION: Array<Option<i32>> = Array::with_max_entries(1, 0);
-
-#[inline(always)]
-fn cache_error_xdp_action() -> u32 {
-    use xdp_action::XDP_PASS;
-
-    CACHE_ERROR_XDP_ACTION
-        .get(0)
-        .and_then(|&x| x)
-        .unwrap_or(XDP_PASS)
-}
-
-#[inline(always)]
-fn _cache_error_tc_action() -> i32 {
-    CACHE_ERROR_TC_ACTION
-        .get(0)
-        .and_then(|&x| x)
-        .unwrap_or(TC_ACT_PIPE)
-}
 
 pub enum CacheError {
     PacketOffsetOutofBounds,
@@ -339,7 +315,7 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
         Err(err) => {
             error!(&ctx, "rx_filter: Err({})", err.as_ref());
 
-            cache_error_xdp_action()
+            xdp_action::XDP_PASS
         }
     }
 }
@@ -646,7 +622,7 @@ pub fn hash_keys(ctx: XdpContext) -> u32 {
         Err(err) => {
             error!(&ctx, "hash_keys: Err({})", err.as_ref());
 
-            cache_error_xdp_action()
+            xdp_action::XDP_PASS
         }
     }
 }

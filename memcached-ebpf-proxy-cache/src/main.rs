@@ -1,10 +1,14 @@
+#[allow(unused)]
 use anyhow::Context;
+#[allow(unused)]
 use aya::maps::ProgramArray;
+#[allow(unused)]
 use aya::programs::{Xdp, XdpFlags};
 use aya::{include_bytes_aligned, Bpf};
 use aya_log::BpfLogger;
 use clap::Parser;
 use log::{debug, info, warn};
+#[allow(unused)]
 use memcached_ebpf_proxy_cache_common::CallableProgXdp;
 use tokio::signal;
 
@@ -16,7 +20,7 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let opt = Opt::parse();
+    let _opt = Opt::parse();
 
     env_logger::init();
 
@@ -48,24 +52,24 @@ async fn main() -> Result<(), anyhow::Error> {
         warn!("failed to initialize eBPF logger: {}", e);
     }
 
-    let hash_keys_prog_xdp: &mut Xdp = bpf
-        .program_mut(CallableProgXdp::HashKeys.as_ref())
-        .unwrap()
-        .try_into()?;
+    // let hash_keys_prog_xdp: &mut Xdp = bpf
+    //     .program_mut(CallableProgXdp::HashKeys.as_ref())
+    //     .unwrap()
+    //     .try_into()?;
 
-    hash_keys_prog_xdp.load()?;
+    // hash_keys_prog_xdp.load()?;
 
-    let hash_keys_prog_xdp_fd = hash_keys_prog_xdp.fd()?.try_clone()?;
+    // let hash_keys_prog_xdp_fd = hash_keys_prog_xdp.fd()?.try_clone()?;
 
-    let mut map_callable_progs_xdp =
-        ProgramArray::try_from(bpf.map_mut("MAP_CALLABLE_PROGS_XDP").unwrap())?;
+    // let mut map_callable_progs_xdp =
+    //     ProgramArray::try_from(bpf.map_mut("MAP_CALLABLE_PROGS_XDP").unwrap())?;
 
-    map_callable_progs_xdp.set(CallableProgXdp::HashKeys as u32, &hash_keys_prog_xdp_fd, 0)?;
+    // map_callable_progs_xdp.set(CallableProgXdp::HashKeys as u32, &hash_keys_prog_xdp_fd, 0)?;
 
-    let rx_filter_program: &mut Xdp = bpf.program_mut("rx_filter").unwrap().try_into()?;
-    rx_filter_program.load()?;
-    rx_filter_program.attach(&opt.iface, XdpFlags::default())
-        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+    // let rx_filter_program: &mut Xdp = bpf.program_mut("rx_filter").unwrap().try_into()?;
+    // rx_filter_program.load()?;
+    // rx_filter_program.attach(&opt.iface, XdpFlags::default())
+    //     .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

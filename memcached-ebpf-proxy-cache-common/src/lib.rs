@@ -70,7 +70,7 @@ pub struct CacheEntry {
 }
 
 pub enum CallableProgXdp {
-    HashKeys,
+    HashKey,
     PreparePacket,
     WriteReply,
     InvalidateCache,
@@ -81,7 +81,7 @@ pub enum CallableProgXdp {
 impl AsRef<str> for CallableProgXdp {
     fn as_ref(&self) -> &str {
         match self {
-            CallableProgXdp::HashKeys => "hash_keys",
+            CallableProgXdp::HashKey => "hash_key",
             CallableProgXdp::PreparePacket => "prepare_packet",
             CallableProgXdp::WriteReply => "write_reply",
             CallableProgXdp::InvalidateCache => "invalidate_cache",
@@ -95,7 +95,7 @@ impl CallableProgXdp {
         use CallableProgXdp::*;
 
         iter::empty()
-            .chain(iter::once(HashKeys))
+            .chain(iter::once(HashKey))
             .chain(iter::once(PreparePacket))
             .chain(iter::once(WriteReply))
             .chain(iter::once(InvalidateCache))

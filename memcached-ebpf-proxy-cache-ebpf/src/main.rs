@@ -32,6 +32,14 @@ use network_types::{
     udp::UdpHdr,
 };
 
+#[repr(C)]
+pub struct MemcachedUdpHeader {
+    pub request_id: u16,
+    pub seq_num: u16,
+    pub num_dgram: u16,
+    pub unused: u16,
+}
+
 #[map]
 static MAP_KCACHE: Array<CacheEntry> = Array::with_max_entries(CACHE_ENTRY_COUNT, 0);
 
@@ -140,7 +148,7 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
     let end = ctx.data_end();
     let item_len = mem::size_of::<T>();
 
-    if start + offset + slice_len * item_len > end {
+    if start + offset + slice_len * item_len >= end {
         return None;
     }
 
@@ -180,13 +188,16 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         "rx_filter: recv Ipv4 packet with protocol: {}", protocol as u32
     );
 
-    let (_dest_port, payload_offset) = match protocol {
+    let (dest_port, payload_offset) = match protocol {
         IpProto::Udp => {
             let udphdr: *const UdpHdr =
                 ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*udphdr).dest }),
-                EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN,
+                EthHdr::LEN
+                    + Ipv4Hdr::LEN
+                    + UdpHdr::LEN
+                    + core::mem::size_of::<MemcachedUdpHeader>(),
             )
         }
         IpProto::Tcp => {
@@ -204,7 +215,19 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         unsafe { &mut *ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
             as &mut MemcachedPacketHeader;
 
-    if u16::from_be_bytes(memcached_packet_header.key_length) > MAX_KEY_LENGTH as u16 {
+    let magic_byte = u8::from_be(memcached_packet_header.magic_byte);
+    let opcode = u8::from_be(memcached_packet_header.opcode);
+    let key_length = u16::from_be_bytes(memcached_packet_header.key_length);
+
+    debug!(
+        ctx,
+        "memcached_packet_header magic_byte={} opcode={} key_length={}",
+        magic_byte,
+        opcode,
+        key_length
+    );
+
+    if key_length > MAX_KEY_LENGTH as u16 {
         return Err(CacheError::UnexpectedKeyLen);
     }
 
@@ -217,21 +240,23 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
     const SET: u8 = Opcode::Set as u8;
     const SETQ: u8 = Opcode::SetQ as u8;
 
-    match match (
-        memcached_packet_header.magic_byte,
-        memcached_packet_header.opcode,
-    ) {
-        (REQ_MAGIC_BYTE, SET | SETQ) => Some(CallableProgXdp::InvalidateCache),
-        (REQ_MAGIC_BYTE, GET) => {
+    debug!(
+        ctx,
+        "dest_port={}, magic_byte={}, opcode={}", dest_port, magic_byte, opcode
+    );
+
+    match match (dest_port, magic_byte, opcode) {
+        (MEMCACHED_PORT, REQ_MAGIC_BYTE, SET | SETQ) => Some(CallableProgXdp::InvalidateCache),
+        (MEMCACHED_PORT, REQ_MAGIC_BYTE, GET) => {
             memcached_packet_header.opcode = GETK;
             Some(CallableProgXdp::HashKey)
         }
-        (REQ_MAGIC_BYTE, GETK) => Some(CallableProgXdp::HashKey),
-        (REQ_MAGIC_BYTE, GETQ) => {
+        (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETK) => Some(CallableProgXdp::HashKey),
+        (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETQ) => {
             memcached_packet_header.opcode = GETKQ;
             Some(CallableProgXdp::HashKey)
         }
-        (REQ_MAGIC_BYTE, GETKQ) => Some(CallableProgXdp::HashKey),
+        (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETKQ) => Some(CallableProgXdp::HashKey),
         _ => None,
     } {
         Some(callable_prog_xdp) => {

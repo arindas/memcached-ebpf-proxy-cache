@@ -22,8 +22,8 @@ fn memcache_get_set_consistency() {
 
     let set_client = memcache::connect(memcached_set_endpoint).unwrap();
 
-    const KEY: &str = "37GDDDz18lhngH6eXtkywsx5fmceJpqt";
-    const VAL: &str = "yT7YMZGfsk3WOcv4eowjBlhuyOeTEGBd";
+    const KEY: &str = "foo";
+    const VAL: &str = "bar";
 
     set_client.set(KEY, VAL, 10).unwrap();
 

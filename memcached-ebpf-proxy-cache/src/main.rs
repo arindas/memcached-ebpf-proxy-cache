@@ -20,7 +20,7 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let _opt = Opt::parse();
+    let opt = Opt::parse();
 
     env_logger::init();
 
@@ -66,10 +66,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // map_callable_progs_xdp.set(CallableProgXdp::HashKeys as u32, &hash_keys_prog_xdp_fd, 0)?;
 
-    // let rx_filter_program: &mut Xdp = bpf.program_mut("rx_filter").unwrap().try_into()?;
-    // rx_filter_program.load()?;
-    // rx_filter_program.attach(&opt.iface, XdpFlags::default())
-    //     .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+    let rx_filter_program: &mut Xdp = bpf.program_mut("rx_filter").unwrap().try_into()?;
+    rx_filter_program.load()?;
+    rx_filter_program.attach(&opt.iface, XdpFlags::default())
+        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

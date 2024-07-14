@@ -21,8 +21,9 @@ use memcached_ebpf_proxy_cache_common::{
     CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH,
     MAX_SPIN_LOCK_ITER_RETRY_LIMIT, MAX_TAIL_CALL_LOCK_RETRY_LIMIT, MEMCACHED_PORT,
 };
-use memcached_network_types::binary::{
-    Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte,
+use memcached_network_types::{
+    binary::{Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte},
+    udp::MemcachedUdpHeader,
 };
 #[allow(unused)]
 use network_types::{
@@ -31,14 +32,6 @@ use network_types::{
     tcp::TcpHdr,
     udp::UdpHdr,
 };
-
-#[repr(C)]
-pub struct MemcachedUdpHeader {
-    pub request_id: u16,
-    pub seq_num: u16,
-    pub num_dgram: u16,
-    pub unused: u16,
-}
 
 #[map]
 static MAP_KCACHE: Array<CacheEntry> = Array::with_max_entries(CACHE_ENTRY_COUNT, 0);
@@ -215,9 +208,9 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         unsafe { &mut *ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
             as &mut MemcachedPacketHeader;
 
-    let magic_byte = u8::from_be(memcached_packet_header.magic_byte);
-    let opcode = u8::from_be(memcached_packet_header.opcode);
-    let key_length = u16::from_be_bytes(memcached_packet_header.key_length);
+    let magic_byte = memcached_packet_header.magic_byte;
+    let opcode = memcached_packet_header.opcode;
+    let key_length = memcached_packet_header.key_length.get();
 
     debug!(
         ctx,

@@ -46,6 +46,7 @@ pub struct MemcachedKey {
 #[repr(C)]
 pub struct ParsingContext {
     memcached_packet_offset: usize,
+    memcached_packet_header: MemcachedPacketHeader,
 }
 
 #[map]
@@ -255,6 +256,17 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 
             unsafe {
                 (*parsing_context).memcached_packet_offset = payload_offset;
+                (*parsing_context).memcached_packet_header = MemcachedPacketHeader {
+                    magic_byte: memcached_packet_header.magic_byte,
+                    opcode: memcached_packet_header.opcode,
+                    key_length: memcached_packet_header.key_length,
+                    extras_length: memcached_packet_header.extras_length,
+                    data_type: memcached_packet_header.data_type,
+                    status_or_vbucket: memcached_packet_header.status_or_vbucket,
+                    total_body_length: memcached_packet_header.total_body_length,
+                    opaque: [0; 4],
+                    cas: [0; 8],
+                };
 
                 MAP_CALLABLE_PROGS_XDP
                     .tail_call(ctx, callable_prog_xdp as u32)

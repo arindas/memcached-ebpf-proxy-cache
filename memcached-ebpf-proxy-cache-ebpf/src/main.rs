@@ -221,7 +221,8 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     debug!(
         ctx,
-        "memcached_packet_header magic_byte={} opcode={} key_length={}",
+        "rx_filter: dest_port={}, memcached_packet_header: magic_byte={}, opcode={}, key_length={}",
+        dest_port,
         magic_byte,
         opcode,
         key_length
@@ -239,11 +240,6 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
     const GETKQ: u8 = Opcode::GetKQ as u8;
     const SET: u8 = Opcode::Set as u8;
     const SETQ: u8 = Opcode::SetQ as u8;
-
-    debug!(
-        ctx,
-        "dest_port={}, magic_byte={}, opcode={}", dest_port, magic_byte, opcode
-    );
 
     match match (dest_port, magic_byte, opcode) {
         (MEMCACHED_PORT, REQ_MAGIC_BYTE, SET | SETQ) => Some(CallableProgXdp::InvalidateCache),

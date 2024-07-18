@@ -23,6 +23,7 @@ use memcached_ebpf_proxy_cache_common::{
 };
 use memcached_network_types::{
     binary::{Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte},
+    integer_enum_variant_constants,
     udp::MemcachedUdpHeader,
 };
 #[allow(unused)]
@@ -150,14 +151,14 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
 }
 
 #[allow(unused)]
-fn try_spin_lock_acquire(lock: &mut u64, retry_limit: u32) -> Option<()> {
+fn try_spin_lock_acquire(lock: &mut u64, retry_limit: u32) -> Result<(), u32> {
     let mut retries = 0;
 
     while retries < retry_limit && unsafe { atomic_xchg_seqcst(lock as *mut u64, 1) } != 0 {
         retries += 1;
     }
 
-    (retries < retry_limit).then_some(())
+    (retries < retry_limit).then_some(()).ok_or(retries)
 }
 
 #[allow(unused)]
@@ -228,25 +229,28 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     const REQ_MAGIC_BYTE: u8 = ReqMagicByte::ReqPacket as u8;
 
-    const GET: u8 = Opcode::Get as u8;
-    const GETK: u8 = Opcode::GetK as u8;
-    const GETQ: u8 = Opcode::GetQ as u8;
-    const GETKQ: u8 = Opcode::GetKQ as u8;
-    const SET: u8 = Opcode::Set as u8;
-    const SETQ: u8 = Opcode::SetQ as u8;
+    integer_enum_variant_constants!(
+        Opcode,
+        u8,
+        (GET, Get),
+        (GETK, GetK),
+        (GETQ, GetQ),
+        (GETKQ, GetKQ),
+        (SET, Set),
+        (SETQ, SetQ)
+    );
 
     match match (dest_port, magic_byte, opcode) {
         (MEMCACHED_PORT, REQ_MAGIC_BYTE, SET | SETQ) => Some(CallableProgXdp::InvalidateCache),
+        (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETK | GETKQ) => Some(CallableProgXdp::HashKey),
         (MEMCACHED_PORT, REQ_MAGIC_BYTE, GET) => {
             memcached_packet_header.opcode = GETK;
             Some(CallableProgXdp::HashKey)
         }
-        (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETK) => Some(CallableProgXdp::HashKey),
         (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETQ) => {
             memcached_packet_header.opcode = GETKQ;
             Some(CallableProgXdp::HashKey)
         }
-        (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETKQ) => Some(CallableProgXdp::HashKey),
         _ => None,
     } {
         Some(callable_prog_xdp) => {
@@ -255,18 +259,11 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
                 .ok_or(CacheError::MapLookupError)?;
 
             unsafe {
+                (*parsing_context).memcached_packet_header =
+                    MemcachedPacketHeader::from_packet_header_without_opaque_and_cas(
+                        &*memcached_packet_header,
+                    );
                 (*parsing_context).memcached_packet_offset = payload_offset;
-                (*parsing_context).memcached_packet_header = MemcachedPacketHeader {
-                    magic_byte: memcached_packet_header.magic_byte,
-                    opcode: memcached_packet_header.opcode,
-                    key_length: memcached_packet_header.key_length,
-                    extras_length: memcached_packet_header.extras_length,
-                    data_type: memcached_packet_header.data_type,
-                    status_or_vbucket: memcached_packet_header.status_or_vbucket,
-                    total_body_length: memcached_packet_header.total_body_length,
-                    opaque: [0; 4],
-                    cas: [0; 8],
-                };
 
                 MAP_CALLABLE_PROGS_XDP
                     .tail_call(ctx, callable_prog_xdp as u32)

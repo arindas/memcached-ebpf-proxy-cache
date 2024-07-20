@@ -292,6 +292,20 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
     }
 }
 
+#[xdp]
+pub fn hash_key(ctx: XdpContext) -> u32 {
+    info!(&ctx, "hash_key: received a packet");
+
+    xdp_action::XDP_PASS
+}
+
+#[xdp]
+pub fn invalidate_cache(ctx: XdpContext) -> u32 {
+    info!(&ctx, "invalidate_cache: received a packet");
+
+    xdp_action::XDP_PASS
+}
+
 fn try_memcached_ebpf_proxy_cache(ctx: XdpContext) -> Result<u32, u32> {
     info!(&ctx, "received a packet");
     Ok(xdp_action::XDP_PASS)

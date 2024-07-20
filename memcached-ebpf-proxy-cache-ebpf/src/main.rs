@@ -206,6 +206,16 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         _ => return Err(CacheError::UnsupportedProtocol),
     };
 
+    debug!(
+        ctx,
+        "rx_filter: dest_port={}, protocol={}", dest_port, protocol as u32
+    );
+
+    if let (IpProto::Tcp, MEMCACHED_PORT) = (protocol, dest_port) {
+        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::InvalidateCache as u32) }
+            .map_err(|_| CacheError::TailCallError)?;
+    }
+
     let memcached_packet_header =
         unsafe { &mut *ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
             as &mut MemcachedPacketHeader;
@@ -235,13 +245,10 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         (GET, Get),
         (GETK, GetK),
         (GETQ, GetQ),
-        (GETKQ, GetKQ),
-        (SET, Set),
-        (SETQ, SetQ)
+        (GETKQ, GetKQ)
     );
 
     match match (dest_port, magic_byte, opcode) {
-        (MEMCACHED_PORT, REQ_MAGIC_BYTE, SET | SETQ) => Some(CallableProgXdp::InvalidateCache),
         (MEMCACHED_PORT, REQ_MAGIC_BYTE, GETK | GETKQ) => Some(CallableProgXdp::HashKey),
         (MEMCACHED_PORT, REQ_MAGIC_BYTE, GET) => {
             memcached_packet_header.opcode = GETK;
@@ -307,7 +314,45 @@ pub fn invalidate_cache(ctx: XdpContext) -> u32 {
 }
 
 fn try_memcached_ebpf_proxy_cache(ctx: XdpContext) -> Result<u32, u32> {
-    info!(&ctx, "received a packet");
+    let ethhdr: *const EthHdr = ptr_at(&ctx, 0).ok_or(0u32)?; //
+
+    match unsafe { (*ethhdr).ether_type } {
+        EtherType::Ipv4 => {}
+        _ => return Ok(xdp_action::XDP_PASS),
+    }
+
+    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN).ok_or(0u32)?;
+    let source_addr = u32::from_be(unsafe { (*ipv4hdr).src_addr });
+
+    let protocol = unsafe { (*ipv4hdr).proto };
+
+    let (source_port, dest_port) = match protocol {
+        IpProto::Tcp => {
+            let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(0u32)?;
+            (
+                u16::from_be(unsafe { (*tcphdr).source }),
+                u16::from_be(unsafe { (*tcphdr).dest }),
+            )
+        }
+        IpProto::Udp => {
+            let udphdr: *const UdpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(0u32)?;
+            (
+                u16::from_be(unsafe { (*udphdr).source }),
+                u16::from_be(unsafe { (*udphdr).dest }),
+            )
+        }
+        _ => return Err(0),
+    };
+
+    info!(
+        &ctx,
+        "memcached_ebpf_proxy_cache: SRC IP: {:i}, SRC PORT: {}, DST PORT: {}, PROTO: {}",
+        source_addr,
+        source_port,
+        dest_port,
+        protocol as u32
+    );
+
     Ok(xdp_action::XDP_PASS)
 }
 

@@ -26,6 +26,12 @@ pub const MAX_SPIN_LOCK_ITER_RETRY_LIMIT: u32 = 1000;
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
 
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_byte(byte);
+        }
+    }
+
     fn finish(&self) -> u32;
 }
 
@@ -70,7 +76,7 @@ pub struct CacheEntry {
 }
 
 pub enum CallableProgXdp {
-    HashKeys,
+    HashKey,
     PreparePacket,
     WriteReply,
     InvalidateCache,
@@ -81,7 +87,7 @@ pub enum CallableProgXdp {
 impl AsRef<str> for CallableProgXdp {
     fn as_ref(&self) -> &str {
         match self {
-            CallableProgXdp::HashKeys => "hash_keys",
+            CallableProgXdp::HashKey => "hash_key",
             CallableProgXdp::PreparePacket => "prepare_packet",
             CallableProgXdp::WriteReply => "write_reply",
             CallableProgXdp::InvalidateCache => "invalidate_cache",
@@ -95,7 +101,7 @@ impl CallableProgXdp {
         use CallableProgXdp::*;
 
         iter::empty()
-            .chain(iter::once(HashKeys))
+            .chain(iter::once(HashKey))
             .chain(iter::once(PreparePacket))
             .chain(iter::once(WriteReply))
             .chain(iter::once(InvalidateCache))

@@ -26,6 +26,12 @@ pub const MAX_SPIN_LOCK_ITER_RETRY_LIMIT: u32 = 1000;
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
 
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_byte(byte);
+        }
+    }
+
     fn finish(&self) -> u32;
 }
 

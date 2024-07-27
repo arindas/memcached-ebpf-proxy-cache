@@ -54,9 +54,6 @@ pub struct ParsingContext {
 static PARSING_CONTEXT: PerCpuArray<ParsingContext> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
-static MAP_KEYS: PerCpuArray<MemcachedKey> = PerCpuArray::with_max_entries(MAX_KEYS_IN_PACKET, 0);
-
-#[map]
 static CACHE_USAGE_STATS: PerCpuArray<CacheUsageStatistics> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
@@ -143,7 +140,7 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
     let end = ctx.data_end();
     let item_len = mem::size_of::<T>();
 
-    if start + offset + slice_len * item_len >= end {
+    if start + offset + slice_len * item_len > end {
         return None;
     }
 
@@ -233,7 +230,7 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         key_length
     );
 
-    if key_length > MAX_KEY_LENGTH as u16 {
+    if key_length == 0 || key_length > MAX_KEY_LENGTH as u16 {
         return Err(CacheError::UnexpectedKeyLen);
     }
 
@@ -285,17 +282,64 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 pub fn rx_filter(ctx: XdpContext) -> u32 {
     info!(&ctx, "rx_filter: received a packet");
 
-    match try_rx_filter(&ctx) {
-        Ok(ret) => {
+    try_rx_filter(&ctx)
+        .inspect(|&ret| {
             info!(&ctx, "rx_filter: done processing packet, action: {}", ret);
-
-            ret
-        }
-        Err(err) => {
+        })
+        .inspect_err(|err| {
             error!(&ctx, "rx_filter: Err({})", err.as_ref());
+        })
+        .unwrap_or(xdp_action::XDP_PASS)
+}
 
-            xdp_action::XDP_PASS
-        }
+fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
+    let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
+
+    let parsing_context = PARSING_CONTEXT
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let parsing_context = unsafe { &*parsing_context };
+
+    let key_offset = parsing_context.memcached_packet_offset + size_of::<MemcachedPacketHeader>();
+
+    let key_length = parsing_context.memcached_packet_header.key_length.get();
+
+    let key =
+        slice_at::<u8>(ctx, key_offset, key_length.into()).ok_or(CacheError::BadRequestPacket)?;
+
+    let mut hasher = Fnv1AHasher::new();
+    hasher.write(key);
+
+    let key_hash = hasher.finish();
+
+    let cache_idx = key_hash % CACHE_ENTRY_COUNT;
+
+    let cache_entry = MAP_KCACHE
+        .get_ptr_mut(cache_idx)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let cache_entry = unsafe { &mut *cache_entry };
+
+    try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+        .map_err(|_| CacheError::LockRetryLimitHit)?;
+
+    if cache_entry.valid && cache_entry.hash == key_hash {
+        spin_lock_release(&mut cache_entry.lock);
+    } else {
+        spin_lock_release(&mut cache_entry.lock);
+
+        let cache_usage_stats = CACHE_USAGE_STATS
+            .get_ptr_mut(0)
+            .ok_or(CacheError::MapLookupError)?;
+
+        unsafe { (*cache_usage_stats).miss_count += 1 };
+    }
+
+    unsafe {
+        MAP_CALLABLE_PROGS_XDP
+            .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
+            .map_err(|_| CacheError::TailCallError)?;
     }
 }
 
@@ -303,7 +347,14 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
 pub fn hash_key(ctx: XdpContext) -> u32 {
     info!(&ctx, "hash_key: received a packet");
 
-    xdp_action::XDP_PASS
+    try_hash_key(&ctx)
+        .inspect(|&ret| {
+            info!(&ctx, "hash_key: done processing packet, action: {}", ret);
+        })
+        .inspect_err(|err| {
+            error!(&ctx, "hash_key: Err({})", err.as_ref());
+        })
+        .unwrap_or(xdp_action::XDP_PASS)
 }
 
 #[xdp]

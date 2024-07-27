@@ -26,6 +26,7 @@ pub const MAX_SPIN_LOCK_ITER_RETRY_LIMIT: u32 = 1000;
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
 
+    #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             self.write_byte(byte);
@@ -40,27 +41,32 @@ pub struct Fnv1AHasher {
 }
 
 impl Fnv1AHasher {
+    #[inline(always)]
     pub fn with_state(state: u32) -> Self {
         Self { state }
     }
 
+    #[inline(always)]
     pub fn new() -> Self {
         Self::with_state(FNV_OFFSET_BASIS_32)
     }
 }
 
 impl Default for Fnv1AHasher {
+    #[inline(always)]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl Hasher for Fnv1AHasher {
+    #[inline(always)]
     fn write_byte(&mut self, byte: u8) {
         self.state ^= u32::from(byte);
         self.state = self.state.wrapping_mul(FNV_PRIME_32);
     }
 
+    #[inline(always)]
     fn finish(&self) -> u32 {
         self.state
     }

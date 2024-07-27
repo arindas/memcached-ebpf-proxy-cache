@@ -147,7 +147,7 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
     Some(unsafe { slice::from_raw_parts((start + offset) as *const T, slice_len) })
 }
 
-#[allow(unused)]
+#[inline(always)]
 fn try_spin_lock_acquire(lock: &mut u64, retry_limit: u32) -> Result<(), u32> {
     let mut retries = 0;
 
@@ -155,14 +155,19 @@ fn try_spin_lock_acquire(lock: &mut u64, retry_limit: u32) -> Result<(), u32> {
         retries += 1;
     }
 
-    (retries < retry_limit).then_some(()).ok_or(retries)
+    if retries < retry_limit {
+        Ok(())
+    } else {
+        Err(retries)
+    }
 }
 
-#[allow(unused)]
+#[inline(always)]
 fn spin_lock_release(lock: &mut u64) {
     unsafe { atomic_xchg_seqcst(lock as *mut u64, 0) };
 }
 
+#[inline(always)]
 fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
     let ethhdr: *const EthHdr = ptr_at(ctx, 0).ok_or(CacheError::HeaderParseError)?;
 
@@ -282,17 +287,24 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 pub fn rx_filter(ctx: XdpContext) -> u32 {
     info!(&ctx, "rx_filter: received a packet");
 
-    try_rx_filter(&ctx)
-        .inspect(|&ret| {
+    match try_rx_filter(&ctx) {
+        Ok(ret) => {
             info!(&ctx, "rx_filter: done processing packet, action: {}", ret);
-        })
-        .inspect_err(|err| {
+
+            ret
+        }
+        Err(err) => {
             error!(&ctx, "rx_filter: Err({})", err.as_ref());
-        })
-        .unwrap_or(xdp_action::XDP_PASS)
+
+            xdp_action::XDP_PASS
+        }
+    }
 }
 
+#[inline(always)]
 fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
+    info!(ctx, "try_hash_key: received a packet");
+
     let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
     let parsing_context = PARSING_CONTEXT
@@ -315,46 +327,43 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_idx = key_hash % CACHE_ENTRY_COUNT;
 
-    let cache_entry = MAP_KCACHE
-        .get_ptr_mut(cache_idx)
-        .ok_or(CacheError::MapLookupError)?;
+    // let cache_entry = MAP_KCACHE.get_ptr_mut(cache_idx)
+    //     .ok_or(CacheError::MapLookupError)?;
 
-    let cache_entry = unsafe { &mut *cache_entry };
+    // let cache_entry = unsafe { &mut *cache_entry };
 
-    try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
-        .map_err(|_| CacheError::LockRetryLimitHit)?;
+    // try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+    //     .map_err(|_| CacheError::LockRetryLimitHit)?;
 
-    if cache_entry.valid && cache_entry.hash == key_hash {
-        spin_lock_release(&mut cache_entry.lock);
-    } else {
-        spin_lock_release(&mut cache_entry.lock);
+    // if cache_entry.valid && cache_entry.hash == key_hash {
+    //     spin_lock_release(&mut cache_entry.lock);
+    // } else {
+    //     spin_lock_release(&mut cache_entry.lock);
 
-        let cache_usage_stats = CACHE_USAGE_STATS
-            .get_ptr_mut(0)
-            .ok_or(CacheError::MapLookupError)?;
+    //     let cache_usage_stats = CACHE_USAGE_STATS
+    //         .get_ptr_mut(0)
+    //         .ok_or(CacheError::MapLookupError)?;
 
-        unsafe { (*cache_usage_stats).miss_count += 1 };
-    }
+    //     unsafe { (*cache_usage_stats).miss_count += 1 };
+    // }
 
-    unsafe {
-        MAP_CALLABLE_PROGS_XDP
-            .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
-            .map_err(|_| CacheError::TailCallError)?;
-    }
+    // unsafe {
+    //     MAP_CALLABLE_PROGS_XDP
+    //         .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
+    //         .map_err(|_| CacheError::TailCallError)?;
+    // }
+
+    Ok(xdp_action::XDP_PASS)
 }
 
 #[xdp]
 pub fn hash_key(ctx: XdpContext) -> u32 {
     info!(&ctx, "hash_key: received a packet");
 
-    try_hash_key(&ctx)
-        .inspect(|&ret| {
-            info!(&ctx, "hash_key: done processing packet, action: {}", ret);
-        })
-        .inspect_err(|err| {
-            error!(&ctx, "hash_key: Err({})", err.as_ref());
-        })
-        .unwrap_or(xdp_action::XDP_PASS)
+    match try_hash_key(&ctx) {
+        Ok(ret) => ret,
+        Err(_) => xdp_action::XDP_PASS,
+    }
 }
 
 #[xdp]

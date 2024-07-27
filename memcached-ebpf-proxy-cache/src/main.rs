@@ -1,10 +1,14 @@
+#[allow(unused)]
 use anyhow::Context;
+#[allow(unused)]
 use aya::maps::ProgramArray;
+#[allow(unused)]
 use aya::programs::{Xdp, XdpFlags};
 use aya::{include_bytes_aligned, Bpf};
 use aya_log::BpfLogger;
 use clap::Parser;
 use log::{debug, info, warn};
+#[allow(unused)]
 use memcached_ebpf_proxy_cache_common::CallableProgXdp;
 use tokio::signal;
 
@@ -48,19 +52,22 @@ async fn main() -> Result<(), anyhow::Error> {
         warn!("failed to initialize eBPF logger: {}", e);
     }
 
-    let hash_keys_prog_xdp: &mut Xdp = bpf
-        .program_mut(CallableProgXdp::HashKeys.as_ref())
-        .unwrap()
-        .try_into()?;
-
-    hash_keys_prog_xdp.load()?;
-
-    let hash_keys_prog_xdp_fd = hash_keys_prog_xdp.fd()?.try_clone()?;
-
     let mut map_callable_progs_xdp =
-        ProgramArray::try_from(bpf.map_mut("MAP_CALLABLE_PROGS_XDP").unwrap())?;
+        ProgramArray::try_from(bpf.take_map("MAP_CALLABLE_PROGS_XDP").unwrap())?;
 
-    map_callable_progs_xdp.set(CallableProgXdp::HashKeys as u32, &hash_keys_prog_xdp_fd, 0)?;
+    for callable_prog_xdp in CallableProgXdp::variants() {
+        let xdp_program: Option<&mut Xdp> = bpf
+            .program_mut(callable_prog_xdp.as_ref())
+            .and_then(|x| x.try_into().ok());
+
+        let xdp_fd = xdp_program
+            .and_then(|x| x.load().ok().and(Some(x)))
+            .and_then(|x| x.fd().ok());
+
+        if let Some(xdp_fd) = xdp_fd {
+            map_callable_progs_xdp.set(callable_prog_xdp as u32, xdp_fd, 0)?;
+        }
+    }
 
     let rx_filter_program: &mut Xdp = bpf.program_mut("rx_filter").unwrap().try_into()?;
     rx_filter_program.load()?;

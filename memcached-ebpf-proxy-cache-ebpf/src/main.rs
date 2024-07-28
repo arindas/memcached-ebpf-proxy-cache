@@ -290,12 +290,10 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
     match try_rx_filter(&ctx) {
         Ok(ret) => {
             info!(&ctx, "rx_filter: done processing packet, action: {}", ret);
-
             ret
         }
         Err(err) => {
             error!(&ctx, "rx_filter: Err({})", err.as_ref());
-
             xdp_action::XDP_PASS
         }
     }
@@ -360,8 +358,14 @@ pub fn hash_key(ctx: XdpContext) -> u32 {
     info!(&ctx, "hash_key: received a packet");
 
     match try_hash_key(&ctx) {
-        Ok(ret) => ret,
-        Err(_) => xdp_action::XDP_PASS,
+        Ok(ret) => {
+            info!(&ctx, "hash_key: done processing packet, action: {}", ret);
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "hash_key: Err({})", err.as_ref());
+            xdp_action::XDP_PASS
+        }
     }
 }
 

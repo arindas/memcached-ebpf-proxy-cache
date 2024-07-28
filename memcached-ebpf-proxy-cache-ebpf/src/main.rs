@@ -317,18 +317,19 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let key_length = parsing_context.memcached_packet_header.key_length.get();
 
-    let key =
-        slice_at::<u8>(ctx, key_offset, key_length.into()).ok_or(CacheError::BadRequestPacket)?;
+    // let key =
+    //     slice_at::<u8>(ctx, key_offset, key_length.into()).ok_or(CacheError::BadRequestPacket)?;
 
-    let mut hasher = Fnv1AHasher::new();
-    hasher.write(key);
+    // let mut hasher = Fnv1AHasher::new();
+    // hasher.write(key);
 
-    let key_hash = hasher.finish();
+    // let key_hash = hasher.finish();
 
-    let cache_idx = key_hash % CACHE_ENTRY_COUNT;
+    // let cache_idx = key_hash % CACHE_ENTRY_COUNT;
 
-    // let cache_entry = MAP_KCACHE.get_ptr_mut(cache_idx)
-    //     .ok_or(CacheError::MapLookupError)?;
+    let cache_entry = MAP_KCACHE
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
 
     // let cache_entry = unsafe { &mut *cache_entry };
 

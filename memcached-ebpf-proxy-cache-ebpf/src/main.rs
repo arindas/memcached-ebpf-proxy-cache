@@ -318,35 +318,40 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let parsing_context = unsafe { &*parsing_context };
 
-    let key_offset = parsing_context.memcached_packet_offset + size_of::<MemcachedPacketHeader>();
+    let key_offset = size_of::<MemcachedPacketHeader>();
 
     let key_length = parsing_context.memcached_packet_header.key_length.get();
 
-    debug!(
-        ctx,
-        "try_hash_key: packet_offset = {}", parsing_context.memcached_packet_offset
-    );
+    let key_first_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
 
-    // let key =
-    //     slice_at::<u8>(ctx, key_offset, key_length.into()).ok_or(CacheError::BadRequestPacket)?;
+    debug!(ctx, "try_hash_key: key first byte = {}", unsafe {
+        *key_first_byte
+    });
 
-    // let mut hasher = Fnv1AHasher::new();
-    // hasher.write(key);
+    let mut hasher = Fnv1AHasher::new();
 
-    // let key_hash = hasher.finish();
+    let mut key_byte_idx: u16 = 0;
 
-    // let cache_idx = key_hash % CACHE_ENTRY_COUNT;
+    while key_byte_idx < MAX_KEY_LENGTH as u16 && key_byte_idx < key_length {
+        let key_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+        hasher.write_byte(unsafe { *key_byte });
+        key_byte_idx += 1;
+    }
+
+    let key_hash = hasher.finish();
+
+    let cache_idx = key_hash % CACHE_ENTRY_COUNT;
 
     let cache_entry = MAP_KCACHE
-        .get_ptr_mut(0)
+        .get_ptr_mut(cache_idx)
         .ok_or(CacheError::MapLookupError)?;
 
     let cache_entry = unsafe { &mut *cache_entry };
 
-    try_spin_lock_acquire(&mut cache_entry.lock, 5).map_err(|_| CacheError::LockRetryLimitHit)?;
+    try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+        .map_err(|_| CacheError::LockRetryLimitHit)?;
 
-    if cache_entry.valid && cache_entry.hash == 0 {
-        // TODO: compare hash against key_hash
+    if cache_entry.valid && cache_entry.hash == key_hash {
         spin_lock_release(&mut cache_entry.lock);
     } else {
         spin_lock_release(&mut cache_entry.lock);
@@ -359,7 +364,9 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     }
 
     unsafe {
-        if bpf_xdp_adjust_head(ctx.ctx, 0 - parsing_context.memcached_packet_offset as i32) != 0 {
+        let adjust_head_reset_delta = 0 - parsing_context.memcached_packet_offset as i32;
+
+        if bpf_xdp_adjust_head(ctx.ctx, adjust_head_reset_delta) != 0 {
             return Err(CacheError::PacketOffsetOutofBounds);
         }
 

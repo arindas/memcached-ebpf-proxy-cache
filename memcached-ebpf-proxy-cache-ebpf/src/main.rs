@@ -277,6 +277,10 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
                     );
                 (*parsing_context).memcached_packet_offset = payload_offset;
 
+                if bpf_xdp_adjust_head(ctx.ctx, payload_offset as i32) != 0 {
+                    return Err(CacheError::PacketOffsetOutofBounds);
+                }
+
                 MAP_CALLABLE_PROGS_XDP
                     .tail_call(ctx, callable_prog_xdp as u32)
                     .map_err(|_| CacheError::TailCallError)?;
@@ -355,6 +359,10 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     }
 
     unsafe {
+        if bpf_xdp_adjust_head(ctx.ctx, 0 - parsing_context.memcached_packet_offset as i32) != 0 {
+            return Err(CacheError::PacketOffsetOutofBounds);
+        }
+
         MAP_CALLABLE_PROGS_XDP
             .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
             .map_err(|_| CacheError::TailCallError)?;

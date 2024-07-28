@@ -210,7 +210,10 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     debug!(
         ctx,
-        "rx_filter: dest_port={}, protocol={}", dest_port, protocol as u32
+        "rx_filter: dest_port={}, payload_offset={} protocol={}",
+        dest_port,
+        payload_offset,
+        protocol as u32
     );
 
     if let (IpProto::Tcp, MEMCACHED_PORT) = (protocol, dest_port) {
@@ -314,6 +317,11 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     let key_offset = parsing_context.memcached_packet_offset + size_of::<MemcachedPacketHeader>();
 
     let key_length = parsing_context.memcached_packet_header.key_length.get();
+
+    debug!(
+        ctx,
+        "try_hash_key: packet_offset = {}", parsing_context.memcached_packet_offset
+    );
 
     // let key =
     //     slice_at::<u8>(ctx, key_offset, key_length.into()).ok_or(CacheError::BadRequestPacket)?;

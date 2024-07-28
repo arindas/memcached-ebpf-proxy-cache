@@ -75,6 +75,7 @@ pub enum CacheError {
     UnexpectedKeyLen,
     UnexpectedValLen,
     LockRetryLimitHit,
+    KeyNotFound,
 }
 
 impl AsRef<str> for CacheError {
@@ -90,6 +91,7 @@ impl AsRef<str> for CacheError {
             CacheError::UnexpectedKeyLen => "CacheError::UnexpectedKeyLen",
             CacheError::UnexpectedValLen => "CacheError::UnexpectedValLen",
             CacheError::LockRetryLimitHit => "CacheError::LockRetryLimitHit",
+            CacheError::KeyNotFound => "CacheError::KeyNotFound",
         }
     }
 }
@@ -351,8 +353,11 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
         .map_err(|_| CacheError::LockRetryLimitHit)?;
 
+    let mut key_found = false;
+
     if cache_entry.valid && cache_entry.hash == key_hash {
         spin_lock_release(&mut cache_entry.lock);
+        key_found = true;
     } else {
         spin_lock_release(&mut cache_entry.lock);
 
@@ -368,6 +373,10 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 
         if bpf_xdp_adjust_head(ctx.ctx, adjust_head_reset_delta) != 0 {
             return Err(CacheError::PacketOffsetOutofBounds);
+        }
+
+        if !key_found {
+            return Err(CacheError::KeyNotFound);
         }
 
         MAP_CALLABLE_PROGS_XDP

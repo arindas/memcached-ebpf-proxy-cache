@@ -55,6 +55,8 @@ async fn main() -> Result<(), anyhow::Error> {
     let mut map_callable_progs_xdp =
         ProgramArray::try_from(bpf.take_map("MAP_CALLABLE_PROGS_XDP").unwrap())?;
 
+    let mut num_callable_xdp_programs_loaded = 0;
+
     for callable_prog_xdp in CallableProgXdp::variants() {
         let xdp_program: Option<&mut Xdp> = bpf
             .program_mut(callable_prog_xdp.as_ref())
@@ -66,8 +68,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
         if let Some(xdp_fd) = xdp_fd {
             map_callable_progs_xdp.set(callable_prog_xdp as u32, xdp_fd, 0)?;
+            num_callable_xdp_programs_loaded += 1;
         }
     }
+
+    info!(
+        "Num callable XDP programs loaded: {}",
+        num_callable_xdp_programs_loaded
+    );
 
     let rx_filter_program: &mut Xdp = bpf.program_mut("rx_filter").unwrap().try_into()?;
     rx_filter_program.load()?;

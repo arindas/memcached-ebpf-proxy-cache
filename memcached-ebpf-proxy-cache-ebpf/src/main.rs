@@ -147,7 +147,7 @@ pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<
     Some(unsafe { slice::from_raw_parts((start + offset) as *const T, slice_len) })
 }
 
-#[allow(unused)]
+#[inline(always)]
 fn try_spin_lock_acquire(lock: &mut u64, retry_limit: u32) -> Result<(), u32> {
     let mut retries = 0;
 
@@ -155,14 +155,19 @@ fn try_spin_lock_acquire(lock: &mut u64, retry_limit: u32) -> Result<(), u32> {
         retries += 1;
     }
 
-    (retries < retry_limit).then_some(()).ok_or(retries)
+    if retries < retry_limit {
+        Ok(())
+    } else {
+        Err(retries)
+    }
 }
 
-#[allow(unused)]
+#[inline(always)]
 fn spin_lock_release(lock: &mut u64) {
     unsafe { atomic_xchg_seqcst(lock as *mut u64, 0) };
 }
 
+#[inline(always)]
 fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
     let ethhdr: *const EthHdr = ptr_at(ctx, 0).ok_or(CacheError::HeaderParseError)?;
 
@@ -205,7 +210,10 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     debug!(
         ctx,
-        "rx_filter: dest_port={}, protocol={}", dest_port, protocol as u32
+        "rx_filter: dest_port={}, payload_offset={} protocol={}",
+        dest_port,
+        payload_offset,
+        protocol as u32
     );
 
     if let (IpProto::Tcp, MEMCACHED_PORT) = (protocol, dest_port) {
@@ -269,6 +277,10 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
                     );
                 (*parsing_context).memcached_packet_offset = payload_offset;
 
+                if bpf_xdp_adjust_head(ctx.ctx, payload_offset as i32) != 0 {
+                    return Err(CacheError::PacketOffsetOutofBounds);
+                }
+
                 MAP_CALLABLE_PROGS_XDP
                     .tail_call(ctx, callable_prog_xdp as u32)
                     .map_err(|_| CacheError::TailCallError)?;
@@ -282,17 +294,22 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 pub fn rx_filter(ctx: XdpContext) -> u32 {
     info!(&ctx, "rx_filter: received a packet");
 
-    try_rx_filter(&ctx)
-        .inspect(|&ret| {
+    match try_rx_filter(&ctx) {
+        Ok(ret) => {
             info!(&ctx, "rx_filter: done processing packet, action: {}", ret);
-        })
-        .inspect_err(|err| {
+            ret
+        }
+        Err(err) => {
             error!(&ctx, "rx_filter: Err({})", err.as_ref());
-        })
-        .unwrap_or(xdp_action::XDP_PASS)
+            xdp_action::XDP_PASS
+        }
+    }
 }
 
+#[inline(always)]
 fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
+    info!(ctx, "try_hash_key: received a packet");
+
     let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
     let parsing_context = PARSING_CONTEXT
@@ -301,15 +318,25 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let parsing_context = unsafe { &*parsing_context };
 
-    let key_offset = parsing_context.memcached_packet_offset + size_of::<MemcachedPacketHeader>();
+    let key_offset = size_of::<MemcachedPacketHeader>();
 
     let key_length = parsing_context.memcached_packet_header.key_length.get();
 
-    let key =
-        slice_at::<u8>(ctx, key_offset, key_length.into()).ok_or(CacheError::BadRequestPacket)?;
+    let key_first_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+
+    debug!(ctx, "try_hash_key: key first byte = {}", unsafe {
+        *key_first_byte
+    });
 
     let mut hasher = Fnv1AHasher::new();
-    hasher.write(key);
+
+    let mut key_byte_idx: u16 = 0;
+
+    while key_byte_idx < MAX_KEY_LENGTH as u16 && key_byte_idx < key_length {
+        let key_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+        hasher.write_byte(unsafe { *key_byte });
+        key_byte_idx += 1;
+    }
 
     let key_hash = hasher.finish();
 
@@ -337,6 +364,12 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     }
 
     unsafe {
+        let adjust_head_reset_delta = 0 - parsing_context.memcached_packet_offset as i32;
+
+        if bpf_xdp_adjust_head(ctx.ctx, adjust_head_reset_delta) != 0 {
+            return Err(CacheError::PacketOffsetOutofBounds);
+        }
+
         MAP_CALLABLE_PROGS_XDP
             .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
             .map_err(|_| CacheError::TailCallError)?;
@@ -347,14 +380,16 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 pub fn hash_key(ctx: XdpContext) -> u32 {
     info!(&ctx, "hash_key: received a packet");
 
-    try_hash_key(&ctx)
-        .inspect(|&ret| {
+    match try_hash_key(&ctx) {
+        Ok(ret) => {
             info!(&ctx, "hash_key: done processing packet, action: {}", ret);
-        })
-        .inspect_err(|err| {
+            ret
+        }
+        Err(err) => {
             error!(&ctx, "hash_key: Err({})", err.as_ref());
-        })
-        .unwrap_or(xdp_action::XDP_PASS)
+            xdp_action::XDP_PASS
+        }
+    }
 }
 
 #[xdp]

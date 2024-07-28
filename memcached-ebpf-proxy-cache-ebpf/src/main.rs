@@ -331,30 +331,28 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
         .get_ptr_mut(0)
         .ok_or(CacheError::MapLookupError)?;
 
-    // let cache_entry = unsafe { &mut *cache_entry };
+    let cache_entry = unsafe { &mut *cache_entry };
 
-    // try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
-    //     .map_err(|_| CacheError::LockRetryLimitHit)?;
+    try_spin_lock_acquire(&mut cache_entry.lock, 5).map_err(|_| CacheError::LockRetryLimitHit)?;
 
-    // if cache_entry.valid && cache_entry.hash == key_hash {
-    //     spin_lock_release(&mut cache_entry.lock);
-    // } else {
-    //     spin_lock_release(&mut cache_entry.lock);
+    if cache_entry.valid && cache_entry.hash == 0 {
+        // TODO: compare hash against key_hash
+        spin_lock_release(&mut cache_entry.lock);
+    } else {
+        spin_lock_release(&mut cache_entry.lock);
 
-    //     let cache_usage_stats = CACHE_USAGE_STATS
-    //         .get_ptr_mut(0)
-    //         .ok_or(CacheError::MapLookupError)?;
+        let cache_usage_stats = CACHE_USAGE_STATS
+            .get_ptr_mut(0)
+            .ok_or(CacheError::MapLookupError)?;
 
-    //     unsafe { (*cache_usage_stats).miss_count += 1 };
-    // }
+        unsafe { (*cache_usage_stats).miss_count += 1 };
+    }
 
-    // unsafe {
-    //     MAP_CALLABLE_PROGS_XDP
-    //         .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
-    //         .map_err(|_| CacheError::TailCallError)?;
-    // }
-
-    Ok(xdp_action::XDP_PASS)
+    unsafe {
+        MAP_CALLABLE_PROGS_XDP
+            .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
+            .map_err(|_| CacheError::TailCallError)?;
+    }
 }
 
 #[xdp]

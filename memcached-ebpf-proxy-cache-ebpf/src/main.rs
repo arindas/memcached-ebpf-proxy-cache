@@ -335,7 +335,8 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     let mut key_byte_idx: u16 = 0;
 
     while key_byte_idx < MAX_KEY_LENGTH as u16 && key_byte_idx < key_length {
-        let key_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+        let key_byte = ptr_at::<u8>(ctx, key_offset + key_byte_idx as usize)
+            .ok_or(CacheError::BadRequestPacket)?;
         hasher.write_byte(unsafe { *key_byte });
         key_byte_idx += 1;
     }

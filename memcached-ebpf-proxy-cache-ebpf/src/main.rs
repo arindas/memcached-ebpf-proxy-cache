@@ -414,39 +414,55 @@ pub fn invalidate_cache(ctx: XdpContext) -> u32 {
     xdp_action::XDP_PASS
 }
 
-fn try_memcached_ebpf_proxy_cache(ctx: XdpContext) -> Result<u32, u32> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0).ok_or(0u32)?; //
+pub enum ProxyError {
+    UnsupportedProtocol,
+    HeaderParseError,
+}
+
+impl AsRef<str> for ProxyError {
+    fn as_ref(&self) -> &str {
+        match self {
+            ProxyError::UnsupportedProtocol => "ProxyError::UnsupportedProtocol",
+            ProxyError::HeaderParseError => "ProxyError::HeaderParseError",
+        }
+    }
+}
+
+fn try_memcached_ebpf_proxy_cache(ctx: &XdpContext) -> Result<u32, ProxyError> {
+    let ethhdr: *const EthHdr = ptr_at(ctx, 0).ok_or(ProxyError::HeaderParseError)?;
 
     match unsafe { (*ethhdr).ether_type } {
         EtherType::Ipv4 => {}
         _ => return Ok(xdp_action::XDP_PASS),
     }
 
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN).ok_or(0u32)?;
+    let ipv4hdr: *const Ipv4Hdr = ptr_at(ctx, EthHdr::LEN).ok_or(ProxyError::HeaderParseError)?;
     let source_addr = u32::from_be(unsafe { (*ipv4hdr).src_addr });
 
     let protocol = unsafe { (*ipv4hdr).proto };
 
     let (source_port, dest_port) = match protocol {
         IpProto::Tcp => {
-            let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(0u32)?;
+            let tcphdr: *const TcpHdr =
+                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(ProxyError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*tcphdr).source }),
                 u16::from_be(unsafe { (*tcphdr).dest }),
             )
         }
         IpProto::Udp => {
-            let udphdr: *const UdpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(0u32)?;
+            let udphdr: *const UdpHdr =
+                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(ProxyError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*udphdr).source }),
                 u16::from_be(unsafe { (*udphdr).dest }),
             )
         }
-        _ => return Err(0),
+        _ => return Err(ProxyError::UnsupportedProtocol),
     };
 
     info!(
-        &ctx,
+        ctx,
         "memcached_ebpf_proxy_cache: SRC IP: {:i}, SRC PORT: {}, DST PORT: {}, PROTO: {}",
         source_addr,
         source_port,
@@ -459,9 +475,20 @@ fn try_memcached_ebpf_proxy_cache(ctx: XdpContext) -> Result<u32, u32> {
 
 #[xdp]
 pub fn memcached_ebpf_proxy_cache(ctx: XdpContext) -> u32 {
-    match try_memcached_ebpf_proxy_cache(ctx) {
-        Ok(ret) => ret,
-        Err(_) => xdp_action::XDP_ABORTED,
+    info!(&ctx, "memcached_ebpf_proxy_cache: received a packet");
+
+    match try_memcached_ebpf_proxy_cache(&ctx) {
+        Ok(ret) => {
+            info!(
+                &ctx,
+                "memcached_ebpf_proxy_cache: done processing packet, action: {}", ret
+            );
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "memcached_ebpf_proxy_cache: Err({})", err.as_ref());
+            xdp_action::XDP_ABORTED
+        }
     }
 }
 

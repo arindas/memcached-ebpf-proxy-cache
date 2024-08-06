@@ -9,12 +9,12 @@ pub const MEMCACHED_PORT: u16 = 11211;
 #[test]
 fn memcache_get_set_consistency() {
     let memcached_get_endpoint = format!(
-        "memcache+{}://{}:{}?timeout=10&tcp_nodelay=true",
+        "memcache+{}://{}:{}",
         MEMCACHED_GET_PROTOCOL, MEMCACHED_HOST, MEMCACHED_PORT
     );
 
     let memcached_set_endpoint = format!(
-        "memcache+{}://{}:{}?timeout=10&tcp_nodelay=true",
+        "memcache+{}://{}:{}?tcp_nodelay=false",
         MEMCACHED_SET_PROTOCOL, MEMCACHED_HOST, MEMCACHED_PORT
     );
 

@@ -67,6 +67,7 @@ async fn main() -> Result<(), anyhow::Error> {
             .and_then(|x| x.fd().ok());
 
         if let Some(xdp_fd) = xdp_fd {
+            info!("Loading program: {}", callable_prog_xdp.as_ref());
             map_callable_progs_xdp.set(callable_prog_xdp as u32, xdp_fd, 0)?;
             num_callable_xdp_programs_loaded += 1;
         }

@@ -21,6 +21,9 @@ use memcached_ebpf_proxy_cache_common::{
     CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH,
     MAX_SPIN_LOCK_ITER_RETRY_LIMIT, MAX_TAIL_CALL_LOCK_RETRY_LIMIT, MEMCACHED_PORT,
 };
+use memcached_ebpf_proxy_cache_common::{
+    MEMCACHED_SET_PACKET_HEADER_EXTRAS_LENGTH, MEMCACHED_TCP_ADDITIONAL_PADDING,
+};
 use memcached_network_types::{
     binary::{Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte},
     integer_enum_variant_constants,
@@ -204,7 +207,7 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
                 ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*tcphdr).dest }),
-                EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN,
+                EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN + MEMCACHED_TCP_ADDITIONAL_PADDING,
             )
         }
         _ => return Err(CacheError::UnsupportedProtocol),
@@ -217,11 +220,6 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         payload_offset,
         protocol as u32
     );
-
-    if let (IpProto::Tcp, MEMCACHED_PORT) = (protocol, dest_port) {
-        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::InvalidateCache as u32) }
-            .map_err(|_| CacheError::TailCallError)?;
-    }
 
     let memcached_packet_header =
         unsafe { &mut *ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
@@ -252,7 +250,9 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         (GET, Get),
         (GETK, GetK),
         (GETQ, GetQ),
-        (GETKQ, GetKQ)
+        (GETKQ, GetKQ),
+        (SET, Set),
+        (SETQ, SetQ)
     );
 
     match match (dest_port, magic_byte, opcode) {
@@ -265,6 +265,7 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
             memcached_packet_header.opcode = GETKQ;
             Some(CallableProgXdp::HashKey)
         }
+        (MEMCACHED_PORT, _, SET | SETQ) => Some(CallableProgXdp::InvalidateCache),
         _ => None,
     } {
         Some(callable_prog_xdp) => {
@@ -308,6 +309,33 @@ pub fn rx_filter(ctx: XdpContext) -> u32 {
     }
 }
 
+#[inline]
+fn try_compute_key_hash(
+    ctx: &XdpContext,
+    key_offset: usize,
+    key_length: u16,
+) -> Result<u32, CacheError> {
+    let mut hasher = Fnv1AHasher::new();
+
+    let mut key_byte_idx: u16 = 0;
+    let mut key_byte_offset = key_offset + key_byte_idx as usize;
+
+    while key_byte_idx < MAX_KEY_LENGTH as u16
+        && key_byte_idx < key_length
+        && key_byte_offset < ctx.data_end()
+    {
+        let key_byte = ptr_at::<u8>(ctx, key_byte_offset).ok_or(CacheError::BadRequestPacket)?;
+        hasher.write_byte(unsafe { *key_byte });
+
+        key_byte_idx += 1;
+        key_byte_offset += mem::size_of::<u8>();
+    }
+
+    let key_hash = hasher.finish();
+
+    Ok(key_hash)
+}
+
 #[inline(always)]
 fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     info!(ctx, "try_hash_key: received a packet");
@@ -330,23 +358,7 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
         *key_first_byte
     });
 
-    let mut hasher = Fnv1AHasher::new();
-
-    let mut key_byte_idx: u16 = 0;
-    let mut key_byte_offset = key_offset + key_byte_idx as usize;
-
-    while key_byte_idx < MAX_KEY_LENGTH as u16
-        && key_byte_idx < key_length
-        && key_byte_offset < ctx.data_end()
-    {
-        let key_byte = ptr_at::<u8>(ctx, key_byte_offset).ok_or(CacheError::BadRequestPacket)?;
-        hasher.write_byte(unsafe { *key_byte });
-
-        key_byte_idx += 1;
-        key_byte_offset += mem::size_of::<u8>();
-    }
-
-    let key_hash = hasher.finish();
+    let key_hash = try_compute_key_hash(ctx, key_offset, key_length)?;
 
     let cache_idx = key_hash % CACHE_ENTRY_COUNT;
 
@@ -407,11 +419,87 @@ pub fn hash_key(ctx: XdpContext) -> u32 {
     }
 }
 
+fn try_invalidate_cache(ctx: &XdpContext) -> Result<u32, CacheError> {
+    info!(ctx, "try_invalidate_cache: received a packet");
+
+    let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
+
+    let cache_usage_stats = CACHE_USAGE_STATS
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
+
+    unsafe { (*cache_usage_stats).set_recv_count += 1 };
+
+    let parsing_context = PARSING_CONTEXT
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let parsing_context = unsafe { &*parsing_context };
+
+    // TODO: use memcached_packet_header.extras_length for calculating key_offset
+    // let extras_length = parsing_context.memcached_packet_header.extras_length;
+    // let key_offset = size_of::<MemcachedPacketHeader>() + extras_length as usize
+    let key_offset =
+        size_of::<MemcachedPacketHeader>() + MEMCACHED_SET_PACKET_HEADER_EXTRAS_LENGTH as usize;
+
+    let key_length = parsing_context.memcached_packet_header.key_length.get();
+
+    let key_first_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+
+    debug!(ctx, "try_invalidate_cache: key first byte = {}", unsafe {
+        *key_first_byte
+    });
+
+    let key_hash = try_compute_key_hash(ctx, key_offset, key_length)?;
+
+    let cache_idx = key_hash % CACHE_ENTRY_COUNT;
+
+    debug!(ctx, "try_invalidate_cache: cache_idx = {}", cache_idx);
+
+    let cache_entry = MAP_KCACHE
+        .get_ptr_mut(cache_idx)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let cache_entry = unsafe { &mut *cache_entry };
+
+    try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+        .map_err(|_| CacheError::LockRetryLimitHit)?;
+
+    if cache_entry.valid {
+        cache_entry.valid = false;
+        unsafe { (*cache_usage_stats).invalidation_count += 1 };
+    }
+
+    spin_lock_release(&mut cache_entry.lock);
+
+    let _value_offset = key_offset + key_length as usize;
+
+    let adjust_head_reset_delta = 0 - parsing_context.memcached_packet_offset as i32;
+
+    if unsafe { bpf_xdp_adjust_head(ctx.ctx, adjust_head_reset_delta) } != 0 {
+        return Err(CacheError::PacketOffsetOutofBounds);
+    }
+
+    Ok(xdp_action::XDP_PASS)
+}
+
 #[xdp]
 pub fn invalidate_cache(ctx: XdpContext) -> u32 {
     info!(&ctx, "invalidate_cache: received a packet");
 
-    xdp_action::XDP_PASS
+    match try_invalidate_cache(&ctx) {
+        Ok(ret) => {
+            info!(
+                &ctx,
+                "invalidate_cache: done processing packet, action: {}", ret
+            );
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "invalidate_cache: Err({})", err.as_ref());
+            xdp_action::XDP_PASS
+        }
+    }
 }
 
 pub enum ProxyError {

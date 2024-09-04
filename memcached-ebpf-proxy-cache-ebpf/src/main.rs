@@ -13,7 +13,7 @@ use aya_ebpf::{
 };
 #[allow(unused)]
 use aya_log_ebpf::{debug, error, info};
-use core::intrinsics::atomic_xchg_seqcst;
+use core::{intrinsics::atomic_xchg_seqcst, usize};
 use core::{mem, slice};
 #[allow(unused)]
 use memcached_ebpf_proxy_cache_common::{
@@ -22,7 +22,7 @@ use memcached_ebpf_proxy_cache_common::{
     MAX_SPIN_LOCK_ITER_RETRY_LIMIT, MAX_TAIL_CALL_LOCK_RETRY_LIMIT, MEMCACHED_PORT,
 };
 use memcached_network_types::{
-    binary::{Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte, ReqPacketHeader},
+    binary::{Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte},
     integer_enum_variant_constants,
     udp::MemcachedUdpHeader,
 };
@@ -412,44 +412,32 @@ fn try_invalidate_cache(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let payload_offset = EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN + 11;
 
-    let first_byte =
-        ptr_at::<u8>(ctx, payload_offset).ok_or(CacheError::PacketOffsetOutofBounds)?;
-    let second_byte =
-        ptr_at::<u8>(ctx, payload_offset + 1).ok_or(CacheError::PacketOffsetOutofBounds)?;
+    let packet_header =
+        ptr_at::<MemcachedPacketHeader>(ctx, payload_offset).ok_or(CacheError::HeaderParseError)?;
+
+    let packet_header = unsafe { &*packet_header };
+
+    if packet_header.opcode != Opcode::Set as u8 {
+        return Err(CacheError::BadRequestPacket);
+    }
+
+    let key_offset = payload_offset
+        + mem::size_of::<MemcachedPacketHeader>()
+        + packet_header.extras_length as usize;
+
+    let _key_length = packet_header.key_length.get();
+
+    let key_byte_idx: u16 = 0;
+    let key_byte_offset = key_offset + key_byte_idx as usize;
+
+    let key_byte = ptr_at::<u8>(ctx, key_byte_offset).ok_or(CacheError::BadRequestPacket)?;
 
     info!(
         ctx,
-        "try_invalidate_cache: packet_bytes[..2] = [{:x}, {:x}]",
-        unsafe { *first_byte },
-        unsafe { *second_byte },
+        "try_invalidate_cache: key[{}] = {}",
+        key_byte_idx,
+        unsafe { *key_byte }
     );
-
-    let _24th_byte_opt = ptr_at::<u8>(ctx, payload_offset + 23);
-
-    if let Some(_24th_byte_ptr) = _24th_byte_opt {
-        info!(
-            ctx,
-            "try_invalidate_cache: packet_bytes[23] = {:x}",
-            unsafe { *_24th_byte_ptr }
-        );
-
-        let packet_header = ptr_at::<MemcachedPacketHeader>(ctx, payload_offset)
-            .ok_or(CacheError::HeaderParseError)?;
-
-        let packet_header = unsafe { &*packet_header };
-
-        info!(
-            ctx,
-            "try_invalidate_cache: packet_header magic_byte={:x} opcode={:x} key_length={}, extras_length={}, total_body_length={}",
-            packet_header.magic_byte as u8,
-            packet_header.opcode as u8,
-            packet_header.key_length.get(),
-            packet_header.extras_length,
-            packet_header.total_body_length.get(),
-        );
-    } else {
-        error!(ctx, "try_invalidate_cache: 24th byte not present in packet");
-    }
 
     Ok(xdp_action::XDP_PASS)
 }

@@ -23,6 +23,8 @@ pub const MAX_TAIL_CALL_LOCK_RETRY_LIMIT: u32 = 3;
 
 pub const MAX_SPIN_LOCK_ITER_RETRY_LIMIT: u32 = 5;
 
+pub const MEMCACHED_TCP_ADDITIONAL_PADDING: usize = 11;
+
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
 

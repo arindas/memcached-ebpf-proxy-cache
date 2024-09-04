@@ -13,8 +13,9 @@ use aya_ebpf::{
 };
 #[allow(unused)]
 use aya_log_ebpf::{debug, error, info};
-use core::{intrinsics::atomic_xchg_seqcst, usize};
+use core::intrinsics::atomic_xchg_seqcst;
 use core::{mem, slice};
+use memcached_ebpf_proxy_cache_common::MEMCACHED_TCP_ADDITIONAL_PADDING;
 #[allow(unused)]
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
@@ -204,7 +205,7 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
                 ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*tcphdr).dest }),
-                EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN,
+                EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN + MEMCACHED_TCP_ADDITIONAL_PADDING,
             )
         }
         _ => return Err(CacheError::UnsupportedProtocol),
@@ -217,11 +218,6 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         payload_offset,
         protocol as u32
     );
-
-    if let (IpProto::Tcp, MEMCACHED_PORT) = (protocol, dest_port) {
-        unsafe { MAP_CALLABLE_PROGS_XDP.tail_call(ctx, CallableProgXdp::InvalidateCache as u32) }
-            .map_err(|_| CacheError::TailCallError)?;
-    }
 
     let memcached_packet_header =
         unsafe { &mut *ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
@@ -252,7 +248,9 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
         (GET, Get),
         (GETK, GetK),
         (GETQ, GetQ),
-        (GETKQ, GetKQ)
+        (GETKQ, GetKQ),
+        (SET, Set),
+        (SETQ, SetQ)
     );
 
     match match (dest_port, magic_byte, opcode) {
@@ -265,6 +263,7 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
             memcached_packet_header.opcode = GETKQ;
             Some(CallableProgXdp::HashKey)
         }
+        (MEMCACHED_PORT, _, SET | SETQ) => Some(CallableProgXdp::InvalidateCache),
         _ => None,
     } {
         Some(callable_prog_xdp) => {
@@ -410,34 +409,33 @@ pub fn hash_key(ctx: XdpContext) -> u32 {
 fn try_invalidate_cache(ctx: &XdpContext) -> Result<u32, CacheError> {
     info!(ctx, "try_invalidate_cache: received a packet");
 
-    let payload_offset = EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN + 11;
+    let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
-    let packet_header =
-        ptr_at::<MemcachedPacketHeader>(ctx, payload_offset).ok_or(CacheError::HeaderParseError)?;
+    let parsing_context = PARSING_CONTEXT
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
 
-    let packet_header = unsafe { &*packet_header };
+    let parsing_context = unsafe { &*parsing_context };
 
-    if packet_header.opcode != Opcode::Set as u8 {
-        return Err(CacheError::BadRequestPacket);
+    let extras_length = parsing_context.memcached_packet_header.extras_length;
+
+    let key_offset = size_of::<MemcachedPacketHeader>() + extras_length as usize;
+
+    let _key_length = parsing_context.memcached_packet_header.key_length.get();
+
+    let key_first_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+
+    debug!(ctx, "try_invalidate_cache: key first byte = {}", unsafe {
+        *key_first_byte
+    });
+
+    let adjust_head_reset_delta = 0 - parsing_context.memcached_packet_offset as i32;
+
+    unsafe {
+        if bpf_xdp_adjust_head(ctx.ctx, adjust_head_reset_delta) != 0 {
+            return Err(CacheError::PacketOffsetOutofBounds);
+        }
     }
-
-    let key_offset = payload_offset
-        + mem::size_of::<MemcachedPacketHeader>()
-        + packet_header.extras_length as usize;
-
-    let _key_length = packet_header.key_length.get();
-
-    let key_byte_idx: u16 = 0;
-    let key_byte_offset = key_offset + key_byte_idx as usize;
-
-    let key_byte = ptr_at::<u8>(ctx, key_byte_offset).ok_or(CacheError::BadRequestPacket)?;
-
-    info!(
-        ctx,
-        "try_invalidate_cache: key[{}] = {}",
-        key_byte_idx,
-        unsafe { *key_byte }
-    );
 
     Ok(xdp_action::XDP_PASS)
 }

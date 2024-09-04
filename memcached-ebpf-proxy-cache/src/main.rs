@@ -78,6 +78,11 @@ async fn main() -> Result<(), anyhow::Error> {
         num_callable_xdp_programs_loaded
     );
 
+    // let x: &mut Xdp = bpf.program_mut("invalidate_cache").unwrap().try_into()?;
+    // x.load()?;
+    // x.attach(&opt.iface, XdpFlags::default())
+    //      .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+
     let rx_filter_program: &mut Xdp = bpf.program_mut("rx_filter").unwrap().try_into()?;
     rx_filter_program.load()?;
     rx_filter_program.attach(&opt.iface, XdpFlags::default())

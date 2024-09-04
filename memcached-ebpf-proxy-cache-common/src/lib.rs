@@ -25,6 +25,8 @@ pub const MAX_SPIN_LOCK_ITER_RETRY_LIMIT: u32 = 5;
 
 pub const MEMCACHED_TCP_ADDITIONAL_PADDING: usize = 11;
 
+pub const MEMCACHED_SET_PACKET_HEADER_EXTRAS_LENGTH: u8 = 8;
+
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
 

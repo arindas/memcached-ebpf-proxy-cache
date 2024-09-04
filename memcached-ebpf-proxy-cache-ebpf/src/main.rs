@@ -436,7 +436,7 @@ fn try_invalidate_cache(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let parsing_context = unsafe { &*parsing_context };
 
-    // TODO: use memcached_packet_header.extras_length in the future
+    // TODO: use memcached_packet_header.extras_length for calculating key_offset
     // let extras_length = parsing_context.memcached_packet_header.extras_length;
     // let key_offset = size_of::<MemcachedPacketHeader>() + extras_length as usize
     let key_offset =

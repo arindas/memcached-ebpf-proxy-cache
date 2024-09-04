@@ -3,23 +3,19 @@
 #![allow(internal_features)]
 #![feature(core_intrinsics)]
 
-#[allow(unused)]
 use aya_ebpf::{
-    bindings::xdp_action,
+    bindings::{xdp_action, TC_ACT_OK},
     helpers::bpf_xdp_adjust_head,
-    macros::{map, xdp},
+    macros::{classifier, map, xdp},
     maps::{Array, PerCpuArray, ProgramArray},
-    programs::XdpContext,
+    programs::{TcContext, XdpContext},
 };
-#[allow(unused)]
 use aya_log_ebpf::{debug, error, info};
-use core::intrinsics::atomic_xchg_seqcst;
-use core::{mem, slice};
-#[allow(unused)]
+use core::{intrinsics::atomic_xchg_seqcst, mem, slice};
+
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
-    CACHE_ENTRY_COUNT, MAX_KEYS_IN_PACKET, MAX_KEY_LENGTH, MAX_PACKET_LENGTH,
-    MAX_SPIN_LOCK_ITER_RETRY_LIMIT, MAX_TAIL_CALL_LOCK_RETRY_LIMIT, MEMCACHED_PORT,
+    CACHE_ENTRY_COUNT, MAX_KEY_LENGTH, MAX_SPIN_LOCK_ITER_RETRY_LIMIT, MEMCACHED_PORT,
 };
 use memcached_ebpf_proxy_cache_common::{
     MEMCACHED_SET_PACKET_HEADER_EXTRAS_LENGTH, MEMCACHED_TCP_ADDITIONAL_PADDING,
@@ -29,7 +25,6 @@ use memcached_network_types::{
     integer_enum_variant_constants,
     udp::MemcachedUdpHeader,
 };
-#[allow(unused)]
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
@@ -498,6 +493,29 @@ pub fn invalidate_cache(ctx: XdpContext) -> u32 {
         Err(err) => {
             error!(&ctx, "invalidate_cache: Err({})", err.as_ref());
             xdp_action::XDP_PASS
+        }
+    }
+}
+
+pub fn try_tx_filter(_ctx: &TcContext) -> Result<i32, CacheError> {
+    Ok(TC_ACT_OK)
+}
+
+#[classifier]
+pub fn tx_filter(ctx: TcContext) -> i32 {
+    info!(&ctx, "tx_filter: received a packet");
+
+    match try_tx_filter(&ctx) {
+        Ok(ret) => {
+            info!(
+                &ctx,
+                "try_tx_filter: done processing packet, action: {}", ret
+            );
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "try_tx_filter: Err({})", err.as_ref());
+            TC_ACT_OK
         }
     }
 }

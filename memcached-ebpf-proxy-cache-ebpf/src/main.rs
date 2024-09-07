@@ -582,7 +582,7 @@ pub fn try_tx_filter(ctx: &TcContext) -> Result<i32, CacheError> {
         unsafe { MAP_CALLABLE_PROGS_TC.tail_call(ctx, callable_prog_tc as u32) }
             .map_err(|_| CacheError::TailCallError)?;
     } else {
-        Ok(TC_ACT_OK)
+        Err(CacheError::BadResponsePacket)
     }
 }
 

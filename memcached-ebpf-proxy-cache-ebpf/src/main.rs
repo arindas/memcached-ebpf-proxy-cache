@@ -21,7 +21,7 @@ use memcached_ebpf_proxy_cache_common::{
     MEMCACHED_SET_PACKET_HEADER_EXTRAS_LENGTH, MEMCACHED_TCP_ADDITIONAL_PADDING,
 };
 use memcached_network_types::{
-    binary::{Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte},
+    binary::{Opcode, PacketHeader as MemcachedPacketHeader, ReqMagicByte, ResMagicByte},
     integer_enum_variant_constants,
     udp::MemcachedUdpHeader,
 };
@@ -68,6 +68,7 @@ pub enum CacheError {
     PtrSliceCoercionError,
     MapLookupError,
     BadRequestPacket,
+    BadResponsePacket,
     TailCallError,
     UnsupportedProtocol,
     UnexpectedKeyLen,
@@ -84,6 +85,7 @@ impl AsRef<str> for CacheError {
             CacheError::PtrSliceCoercionError => "CacheError::PtrSliceCoercionError",
             CacheError::MapLookupError => "CacheError::MapLookupError",
             CacheError::BadRequestPacket => "CacheError::BadRequestPacket",
+            CacheError::BadResponsePacket => "CacheError::BadResponsePacket",
             CacheError::TailCallError => "CacheError::TailCallError",
             CacheError::UnsupportedProtocol => "CacheError::UnsupportedProtocol",
             CacheError::UnexpectedKeyLen => "CacheError::UnexpectedKeyLen",
@@ -117,7 +119,7 @@ pub fn compute_ip_checksum(ip: *const Ipv4Hdr) -> u16 {
 }
 
 #[inline(always)]
-pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
+pub fn xdp_ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
     let start = ctx.data();
     let end = ctx.data_end();
     let item_len = mem::size_of::<T>();
@@ -130,21 +132,26 @@ pub fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Option<*const T> {
 }
 
 #[inline(always)]
-pub fn ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Option<*mut T> {
-    Some(ptr_at::<T>(ctx, offset)? as *mut T)
+pub fn xdp_ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Option<*mut T> {
+    Some(xdp_ptr_at::<T>(ctx, offset)? as *mut T)
 }
 
 #[inline(always)]
-pub fn slice_at<T>(ctx: &XdpContext, offset: usize, slice_len: usize) -> Option<&[T]> {
+pub fn tc_ptr_at<T>(ctx: &TcContext, offset: usize) -> Option<*const T> {
     let start = ctx.data();
     let end = ctx.data_end();
     let item_len = mem::size_of::<T>();
 
-    if start + offset + slice_len * item_len > end {
+    if start + offset + item_len > end {
         return None;
     }
 
-    Some(unsafe { slice::from_raw_parts((start + offset) as *const T, slice_len) })
+    Some((start + offset) as *const T)
+}
+
+#[inline(always)]
+pub fn tc_ptr_at_mut<T>(ctx: &TcContext, offset: usize) -> Option<*mut T> {
+    Some(tc_ptr_at::<T>(ctx, offset)? as *mut T)
 }
 
 #[inline(always)]
@@ -169,37 +176,35 @@ fn spin_lock_release(lock: &mut u64) {
 
 #[inline(always)]
 fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
-    let ethhdr: *const EthHdr = ptr_at(ctx, 0).ok_or(CacheError::HeaderParseError)?;
+    let ethhdr: *const EthHdr = xdp_ptr_at(ctx, 0).ok_or(CacheError::HeaderParseError)?;
 
     match unsafe { (*ethhdr).ether_type } {
         EtherType::Ipv4 => {}
         _ => return Err(CacheError::HeaderParseError),
     }
 
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(ctx, EthHdr::LEN).ok_or(CacheError::HeaderParseError)?;
+    let ipv4hdr: *const Ipv4Hdr =
+        xdp_ptr_at(ctx, EthHdr::LEN).ok_or(CacheError::HeaderParseError)?;
 
     let protocol = unsafe { (*ipv4hdr).proto };
 
     debug!(
         ctx,
-        "rx_filter: recv Ipv4 packet with protocol: {}", protocol as u32
+        "try_rx_filter: recv Ipv4 packet with protocol: {}", protocol as u32
     );
 
     let (dest_port, payload_offset) = match protocol {
         IpProto::Udp => {
             let udphdr: *const UdpHdr =
-                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
+                xdp_ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*udphdr).dest }),
-                EthHdr::LEN
-                    + Ipv4Hdr::LEN
-                    + UdpHdr::LEN
-                    + core::mem::size_of::<MemcachedUdpHeader>(),
+                EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + mem::size_of::<MemcachedUdpHeader>(),
             )
         }
         IpProto::Tcp => {
             let tcphdr: *const TcpHdr =
-                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
+                xdp_ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*tcphdr).dest }),
                 EthHdr::LEN + Ipv4Hdr::LEN + TcpHdr::LEN + MEMCACHED_TCP_ADDITIONAL_PADDING,
@@ -210,14 +215,14 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     debug!(
         ctx,
-        "rx_filter: dest_port={}, payload_offset={} protocol={}",
+        "try_rx_filter: dest_port={}, payload_offset={} protocol={}",
         dest_port,
         payload_offset,
         protocol as u32
     );
 
     let memcached_packet_header =
-        unsafe { &mut *ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
+        unsafe { &mut *xdp_ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
             as &mut MemcachedPacketHeader;
 
     let magic_byte = memcached_packet_header.magic_byte;
@@ -226,7 +231,7 @@ fn try_rx_filter(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     debug!(
         ctx,
-        "rx_filter: dest_port={}, memcached_packet_header: magic_byte={}, opcode={}, key_length={}",
+        "try_rx_filter: dest_port={}, memcached_packet_header: magic_byte={}, opcode={}, key_length={}",
         dest_port,
         magic_byte,
         opcode,
@@ -319,7 +324,8 @@ fn try_compute_key_hash(
         && key_byte_idx < key_length
         && key_byte_offset < ctx.data_end()
     {
-        let key_byte = ptr_at::<u8>(ctx, key_byte_offset).ok_or(CacheError::BadRequestPacket)?;
+        let key_byte =
+            xdp_ptr_at::<u8>(ctx, key_byte_offset).ok_or(CacheError::BadRequestPacket)?;
         hasher.write_byte(unsafe { *key_byte });
 
         key_byte_idx += 1;
@@ -335,7 +341,7 @@ fn try_compute_key_hash(
 fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
     info!(ctx, "try_hash_key: received a packet");
 
-    let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
+    let _payload_ptr: *const u8 = xdp_ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
     let parsing_context = PARSING_CONTEXT
         .get_ptr_mut(0)
@@ -347,7 +353,7 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let key_length = parsing_context.memcached_packet_header.key_length.get();
 
-    let key_first_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+    let key_first_byte = xdp_ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
 
     debug!(ctx, "try_hash_key: key first byte = {}", unsafe {
         *key_first_byte
@@ -417,7 +423,7 @@ pub fn hash_key(ctx: XdpContext) -> u32 {
 fn try_invalidate_cache(ctx: &XdpContext) -> Result<u32, CacheError> {
     info!(ctx, "try_invalidate_cache: received a packet");
 
-    let _payload_ptr: *const u8 = ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
+    let _payload_ptr: *const u8 = xdp_ptr_at(ctx, 0).ok_or(CacheError::BadRequestPacket)?;
 
     let cache_usage_stats = CACHE_USAGE_STATS
         .get_ptr_mut(0)
@@ -439,7 +445,7 @@ fn try_invalidate_cache(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let key_length = parsing_context.memcached_packet_header.key_length.get();
 
-    let key_first_byte = ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
+    let key_first_byte = xdp_ptr_at::<u8>(ctx, key_offset).ok_or(CacheError::BadRequestPacket)?;
 
     debug!(ctx, "try_invalidate_cache: key first byte = {}", unsafe {
         *key_first_byte
@@ -497,8 +503,87 @@ pub fn invalidate_cache(ctx: XdpContext) -> u32 {
     }
 }
 
-pub fn try_tx_filter(_ctx: &TcContext) -> Result<i32, CacheError> {
-    Ok(TC_ACT_OK)
+pub fn try_tx_filter(ctx: &TcContext) -> Result<i32, CacheError> {
+    let ethhdr = tc_ptr_at::<EthHdr>(ctx, 0).ok_or(CacheError::HeaderParseError)?;
+
+    match unsafe { (*ethhdr).ether_type } {
+        EtherType::Ipv4 => {}
+        _ => return Err(CacheError::HeaderParseError),
+    }
+
+    let ipv4hdr = tc_ptr_at::<Ipv4Hdr>(ctx, EthHdr::LEN).ok_or(CacheError::HeaderParseError)?;
+
+    if unsafe { (*ipv4hdr).proto } != IpProto::Udp {
+        return Err(CacheError::UnsupportedProtocol);
+    }
+
+    let udphdr =
+        tc_ptr_at::<UdpHdr>(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(CacheError::HeaderParseError)?;
+
+    let source_port = u16::from_be(unsafe { (*udphdr).source });
+
+    if source_port != 11211 {
+        return Err(CacheError::BadResponsePacket);
+    }
+
+    let payload_offset =
+        EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + mem::size_of::<MemcachedUdpHeader>();
+
+    let memcached_packet_header =
+        unsafe { &mut *tc_ptr_at_mut(ctx, payload_offset).ok_or(CacheError::HeaderParseError)? }
+            as &mut MemcachedPacketHeader;
+
+    let magic_byte = memcached_packet_header.magic_byte;
+    let opcode = memcached_packet_header.opcode;
+    let key_length = memcached_packet_header.key_length.get();
+
+    debug!(
+        ctx,
+        "try_tx_filter: source_port={}, memcached_packet_header: magic_byte={}, opcode={}, key_length={}",
+        source_port,
+        magic_byte,
+        opcode,
+        key_length
+    );
+
+    if key_length == 0 || key_length > MAX_KEY_LENGTH as u16 {
+        return Err(CacheError::UnexpectedKeyLen);
+    }
+
+    const RES_MAGIC_BYTE: u8 = ResMagicByte::ResPacket as u8;
+
+    integer_enum_variant_constants!(
+        Opcode,
+        u8,
+        (GET, Get),
+        (GETK, GetK),
+        (GETQ, GetQ),
+        (GETKQ, GetKQ)
+    );
+
+    let callable_prog_tc = match (magic_byte, opcode) {
+        (RES_MAGIC_BYTE, GET | GETQ | GETK | GETKQ) => Some(CallableProgTc::UpdateCache),
+        _ => None,
+    };
+
+    if let Some(callable_prog_tc) = callable_prog_tc {
+        debug!(
+            ctx,
+            "try_tx_filter: valid packet, attempt tail call to {}",
+            callable_prog_tc.as_ref()
+        );
+
+        let cache_usage_stats = CACHE_USAGE_STATS
+            .get_ptr_mut(0)
+            .ok_or(CacheError::MapLookupError)?;
+
+        unsafe { (*cache_usage_stats).get_recv_count += 1 };
+
+        unsafe { MAP_CALLABLE_PROGS_TC.tail_call(ctx, callable_prog_tc as u32) }
+            .map_err(|_| CacheError::TailCallError)?;
+    } else {
+        Ok(TC_ACT_OK)
+    }
 }
 
 #[classifier]
@@ -535,14 +620,15 @@ impl AsRef<str> for ProxyError {
 }
 
 fn try_memcached_ebpf_proxy_cache(ctx: &XdpContext) -> Result<u32, ProxyError> {
-    let ethhdr: *const EthHdr = ptr_at(ctx, 0).ok_or(ProxyError::HeaderParseError)?;
+    let ethhdr: *const EthHdr = xdp_ptr_at(ctx, 0).ok_or(ProxyError::HeaderParseError)?;
 
     match unsafe { (*ethhdr).ether_type } {
         EtherType::Ipv4 => {}
         _ => return Ok(xdp_action::XDP_PASS),
     }
 
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(ctx, EthHdr::LEN).ok_or(ProxyError::HeaderParseError)?;
+    let ipv4hdr: *const Ipv4Hdr =
+        xdp_ptr_at(ctx, EthHdr::LEN).ok_or(ProxyError::HeaderParseError)?;
     let source_addr = u32::from_be(unsafe { (*ipv4hdr).src_addr });
 
     let protocol = unsafe { (*ipv4hdr).proto };
@@ -550,7 +636,7 @@ fn try_memcached_ebpf_proxy_cache(ctx: &XdpContext) -> Result<u32, ProxyError> {
     let (source_port, dest_port) = match protocol {
         IpProto::Tcp => {
             let tcphdr: *const TcpHdr =
-                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(ProxyError::HeaderParseError)?;
+                xdp_ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(ProxyError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*tcphdr).source }),
                 u16::from_be(unsafe { (*tcphdr).dest }),
@@ -558,7 +644,7 @@ fn try_memcached_ebpf_proxy_cache(ctx: &XdpContext) -> Result<u32, ProxyError> {
         }
         IpProto::Udp => {
             let udphdr: *const UdpHdr =
-                ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(ProxyError::HeaderParseError)?;
+                xdp_ptr_at(ctx, EthHdr::LEN + Ipv4Hdr::LEN).ok_or(ProxyError::HeaderParseError)?;
             (
                 u16::from_be(unsafe { (*udphdr).source }),
                 u16::from_be(unsafe { (*udphdr).dest }),

@@ -115,8 +115,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let tx_filter_program: &mut SchedClassifier =
         bpf.program_mut("tx_filter").unwrap().try_into()?;
     tx_filter_program.load()?;
-    tx_filter_program.attach(&opt.iface, TcAttachType::Egress)
-         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+    tx_filter_program.attach(&opt.iface, TcAttachType::Egress)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

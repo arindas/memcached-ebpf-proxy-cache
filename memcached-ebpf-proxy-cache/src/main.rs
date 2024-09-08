@@ -1,18 +1,16 @@
-#[allow(unused)]
 use anyhow::Context;
-#[allow(unused)]
-use aya::maps::ProgramArray;
-use aya::programs::{tc, SchedClassifier, TcAttachType};
-#[allow(unused)]
-use aya::programs::{Xdp, XdpFlags};
-use aya::{include_bytes_aligned, Bpf};
+use aya::{
+    include_bytes_aligned,
+    maps::ProgramArray,
+    programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
+    Bpf,
+};
 use aya_log::BpfLogger;
 use clap::Parser;
 use log::{debug, info, warn};
-use memcached_ebpf_proxy_cache_common::CallableProgTc;
-#[allow(unused)]
-use memcached_ebpf_proxy_cache_common::CallableProgXdp;
 use tokio::signal;
+
+use memcached_ebpf_proxy_cache_common::{CallableProgTc, CallableProgXdp};
 
 #[derive(Debug, Parser)]
 struct Opt {

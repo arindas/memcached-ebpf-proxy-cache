@@ -688,7 +688,7 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     while cache_entry.valid
         && cache_entry.hash == key_hash
-        && byte_idx < MAX_KV_PAIR_LENGTH as u16
+        && byte_idx < MAX_KEY_LENGTH as u16
         && byte_idx < key_length
         && byte_offset < ctx.data_end()
     {

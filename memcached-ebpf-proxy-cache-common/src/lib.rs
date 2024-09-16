@@ -4,9 +4,11 @@ use core::iter;
 
 pub const MAX_KEY_LENGTH: usize = 250;
 pub const MAX_VAL_LENGTH: usize = 1000;
+
+pub const MAX_KV_PAIR_LENGTH: usize = MAX_KEY_LENGTH + MAX_VAL_LENGTH;
+
 pub const MAX_ADDITIONAL_PAYLOAD_BYTES: usize = 53;
-pub const MAX_CACHE_DATA_SIZE: usize =
-    MAX_KEY_LENGTH + MAX_VAL_LENGTH + MAX_ADDITIONAL_PAYLOAD_BYTES;
+pub const MAX_CACHE_DATA_SIZE: usize = MAX_KV_PAIR_LENGTH + MAX_ADDITIONAL_PAYLOAD_BYTES;
 
 pub const MAX_KEY_IN_MULTIGET: u32 = 30;
 pub const CACHE_ENTRY_COUNT: u32 = 3250000;
@@ -26,6 +28,7 @@ pub const MAX_SPIN_LOCK_ITER_RETRY_LIMIT: u32 = 5;
 pub const MEMCACHED_TCP_ADDITIONAL_PADDING: usize = 11;
 
 pub const MEMCACHED_SET_PACKET_HEADER_EXTRAS_LENGTH: u8 = 8;
+pub const MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH: u8 = 4;
 
 pub trait Hasher {
     fn write_byte(&mut self, byte: u8);
@@ -82,7 +85,7 @@ pub struct CacheEntry {
     pub len: u32,
     pub valid: bool,
     pub hash: u32,
-    pub data: [u8; MAX_CACHE_DATA_SIZE],
+    pub data: [u8; MAX_KV_PAIR_LENGTH],
 }
 
 pub enum CallableProgXdp {

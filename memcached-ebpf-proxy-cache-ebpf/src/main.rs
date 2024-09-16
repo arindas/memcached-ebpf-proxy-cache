@@ -11,11 +11,12 @@ use aya_ebpf::{
     programs::{TcContext, XdpContext},
 };
 use aya_log_ebpf::{debug, error, info};
-use core::{intrinsics::atomic_xchg_seqcst, mem, slice};
+use core::{intrinsics::atomic_xchg_seqcst, mem, slice, usize};
 
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
-    CACHE_ENTRY_COUNT, MAX_KEY_LENGTH, MAX_SPIN_LOCK_ITER_RETRY_LIMIT, MEMCACHED_PORT,
+    CACHE_ENTRY_COUNT, MAX_KEY_LENGTH, MAX_KV_PAIR_LENGTH, MAX_SPIN_LOCK_ITER_RETRY_LIMIT,
+    MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH, MEMCACHED_PORT,
 };
 use memcached_ebpf_proxy_cache_common::{
     MEMCACHED_SET_PACKET_HEADER_EXTRAS_LENGTH, MEMCACHED_TCP_ADDITIONAL_PADDING,
@@ -34,13 +35,6 @@ use network_types::{
 
 #[map]
 static MAP_KCACHE: Array<CacheEntry> = Array::with_max_entries(CACHE_ENTRY_COUNT, 0);
-
-#[repr(C)]
-pub struct MemcachedKey {
-    pub hash: u32,
-    pub data: [u8; MAX_KEY_LENGTH],
-    pub len: u32,
-}
 
 #[repr(C)]
 pub struct ParsingContext {
@@ -638,18 +632,21 @@ pub fn tx_filter(ctx: TcContext) -> i32 {
 }
 
 pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
-    let payload_offset =
+    const PAYLOAD_OFFSET: usize =
         EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + mem::size_of::<MemcachedUdpHeader>();
 
     let memcached_packet_header = unsafe {
         &*ctx
-            .ptr_at(payload_offset)
+            .ptr_at(PAYLOAD_OFFSET)
             .ok_or(CacheError::HeaderParseError)?
     } as &MemcachedPacketHeader;
 
     let magic_byte = memcached_packet_header.magic_byte;
     let opcode = memcached_packet_header.opcode;
     let key_length = memcached_packet_header.key_length.get();
+    let value_length = memcached_packet_header.value_length() as u16;
+
+    let kv_pair_length = key_length + value_length;
 
     debug!(
         ctx,
@@ -659,11 +656,74 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
         key_length
     );
 
-    let key_offset = payload_offset + mem::size_of::<MemcachedPacketHeader>();
+    const KEY_OFFSET: usize = PAYLOAD_OFFSET
+        + mem::size_of::<MemcachedPacketHeader>()
+        + MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as usize;
 
-    let key_hash = try_compute_key_hash(ctx, key_offset, key_length)?;
+    let key_hash = try_compute_key_hash(ctx, KEY_OFFSET, key_length)?;
 
     debug!(ctx, "try_update_cache: key_hash = {}", key_hash);
+
+    let cache_idx = key_hash % CACHE_ENTRY_COUNT;
+
+    let cache_entry = MAP_KCACHE
+        .get_ptr_mut(cache_idx)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let cache_entry = unsafe { &mut *cache_entry };
+
+    try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+        .map_err(|_| CacheError::LockRetryLimitHit)?;
+
+    let mut byte_mask: u8 = 0;
+
+    let mut key_byte_idx: u16 = 0;
+    let mut key_byte_offset = KEY_OFFSET + key_byte_idx as usize;
+
+    while cache_entry.valid
+        && cache_entry.hash == key_hash
+        && key_byte_idx < MAX_KV_PAIR_LENGTH as u16
+        && key_byte_idx < key_length
+        && key_byte_offset < ctx.data_end()
+    {
+        let key_byte = ctx
+            .ptr_at::<u8>(key_byte_offset)
+            .ok_or(CacheError::BadRequestPacket)?;
+
+        byte_mask |= unsafe { *key_byte } ^ cache_entry.data[key_byte_idx as usize];
+
+        key_byte_idx += 1;
+        key_byte_offset += mem::size_of::<u8>();
+    }
+
+    if cache_entry.valid && cache_entry.hash == key_hash && byte_mask == 0 {
+        spin_lock_release(&mut cache_entry.lock);
+        return Ok(TC_ACT_OK);
+    }
+
+    debug!(ctx, "try_update_cache: pre copy byte_mask: {}", byte_mask);
+
+    let mut key_byte_idx: u16 = 0;
+    let mut key_byte_offset = KEY_OFFSET + key_byte_idx as usize;
+
+    while key_byte_idx < MAX_KV_PAIR_LENGTH as u16
+        && key_byte_idx < kv_pair_length
+        && key_byte_offset < ctx.data_end()
+    {
+        let key_byte = ctx
+            .ptr_at::<u8>(key_byte_offset)
+            .ok_or(CacheError::BadRequestPacket)?;
+
+        byte_mask |= unsafe { *key_byte };
+        cache_entry.data[key_byte_idx as usize] = unsafe { *key_byte };
+
+        key_byte_idx += 1;
+        key_byte_offset += mem::size_of::<u8>();
+    }
+
+    debug!(ctx, "try_update_cache: post copy byte_mask: {}", byte_mask);
+
+    spin_lock_release(&mut cache_entry.lock);
 
     Ok(TC_ACT_OK)
 }

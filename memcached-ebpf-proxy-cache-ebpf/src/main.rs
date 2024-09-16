@@ -635,6 +635,10 @@ pub fn tx_filter(ctx: TcContext) -> i32 {
 }
 
 pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
+    let cache_usage_stats = CACHE_USAGE_STATS
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
+
     const PAYLOAD_OFFSET: usize =
         EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + mem::size_of::<MemcachedUdpHeader>();
 
@@ -686,8 +690,9 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
     let mut byte_idx: u16 = 0;
     let mut byte_offset = KEY_OFFSET + byte_idx as usize;
 
-    while cache_entry.valid
-        && cache_entry.hash == key_hash
+    let cached_entry_valid_and_key_hash_equal = cache_entry.valid && cache_entry.hash == key_hash;
+
+    while cached_entry_valid_and_key_hash_equal
         && byte_idx < MAX_KEY_LENGTH as u16
         && byte_idx < key_length
         && byte_offset < ctx.data_end()
@@ -705,7 +710,7 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
     }
 
     // byte_mask != 0 => packet key != cache_entry key
-    if cache_entry.valid && cache_entry.hash == key_hash && byte_mask == 0 {
+    if cached_entry_valid_and_key_hash_equal && byte_mask == 0 {
         spin_lock_release(&mut cache_entry.lock);
         return Ok(TC_ACT_OK);
     }
@@ -737,6 +742,10 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
     cache_entry.len = kv_pair_length as u32;
 
     spin_lock_release(&mut cache_entry.lock);
+
+    unsafe {
+        (*cache_usage_stats).update_count += 1;
+    }
 
     Ok(TC_ACT_OK)
 }

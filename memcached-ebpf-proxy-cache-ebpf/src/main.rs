@@ -474,7 +474,10 @@ fn try_invalidate_cache(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_idx = key_hash % CACHE_ENTRY_COUNT;
 
-    debug!(ctx, "try_invalidate_cache: cache_idx = {}", cache_idx);
+    debug!(
+        ctx,
+        "try_invalidate_cache: key_hash = {}, cache_idx = {}", key_hash, cache_idx
+    );
 
     let cache_entry = MAP_KCACHE
         .get_ptr_mut(cache_idx)
@@ -662,9 +665,12 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     let key_hash = try_compute_key_hash(ctx, KEY_OFFSET, key_length)?;
 
-    debug!(ctx, "try_update_cache: key_hash = {}", key_hash);
-
     let cache_idx = key_hash % CACHE_ENTRY_COUNT;
+
+    debug!(
+        ctx,
+        "try_update_cache: key_hash = {}, cache_idx = {}", key_hash, cache_idx
+    );
 
     let cache_entry = MAP_KCACHE
         .get_ptr_mut(cache_idx)

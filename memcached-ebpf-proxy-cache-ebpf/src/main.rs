@@ -729,6 +729,10 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     debug!(ctx, "try_update_cache: post copy byte_mask: {}", byte_mask);
 
+    cache_entry.valid = true;
+    cache_entry.hash = key_hash;
+    cache_entry.len = kv_pair_length as u32;
+
     spin_lock_release(&mut cache_entry.lock);
 
     Ok(TC_ACT_OK)

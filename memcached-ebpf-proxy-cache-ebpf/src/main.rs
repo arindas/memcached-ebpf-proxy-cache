@@ -677,23 +677,23 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     let mut byte_mask: u8 = 0;
 
-    let mut key_byte_idx: u16 = 0;
-    let mut key_byte_offset = KEY_OFFSET + key_byte_idx as usize;
+    let mut byte_idx: u16 = 0;
+    let mut byte_offset = KEY_OFFSET + byte_idx as usize;
 
     while cache_entry.valid
         && cache_entry.hash == key_hash
-        && key_byte_idx < MAX_KV_PAIR_LENGTH as u16
-        && key_byte_idx < key_length
-        && key_byte_offset < ctx.data_end()
+        && byte_idx < MAX_KV_PAIR_LENGTH as u16
+        && byte_idx < key_length
+        && byte_offset < ctx.data_end()
     {
         let key_byte = ctx
-            .ptr_at::<u8>(key_byte_offset)
+            .ptr_at::<u8>(byte_offset)
             .ok_or(CacheError::BadRequestPacket)?;
 
-        byte_mask |= unsafe { *key_byte } ^ cache_entry.data[key_byte_idx as usize];
+        byte_mask |= unsafe { *key_byte } ^ cache_entry.data[byte_idx as usize];
 
-        key_byte_idx += 1;
-        key_byte_offset += mem::size_of::<u8>();
+        byte_idx += 1;
+        byte_offset += mem::size_of::<u8>();
     }
 
     if cache_entry.valid && cache_entry.hash == key_hash && byte_mask == 0 {
@@ -703,22 +703,22 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     debug!(ctx, "try_update_cache: pre copy byte_mask: {}", byte_mask);
 
-    let mut key_byte_idx: u16 = 0;
-    let mut key_byte_offset = KEY_OFFSET + key_byte_idx as usize;
+    let mut byte_idx: u16 = 0;
+    let mut byte_offset = KEY_OFFSET + byte_idx as usize;
 
-    while key_byte_idx < MAX_KV_PAIR_LENGTH as u16
-        && key_byte_idx < kv_pair_length
-        && key_byte_offset < ctx.data_end()
+    while byte_idx < MAX_KV_PAIR_LENGTH as u16
+        && byte_idx < kv_pair_length
+        && byte_offset < ctx.data_end()
     {
         let key_byte = ctx
-            .ptr_at::<u8>(key_byte_offset)
+            .ptr_at::<u8>(byte_offset)
             .ok_or(CacheError::BadRequestPacket)?;
 
         byte_mask |= unsafe { *key_byte };
-        cache_entry.data[key_byte_idx as usize] = unsafe { *key_byte };
+        cache_entry.data[byte_idx as usize] = unsafe { *key_byte };
 
-        key_byte_idx += 1;
-        key_byte_offset += mem::size_of::<u8>();
+        byte_idx += 1;
+        byte_offset += mem::size_of::<u8>();
     }
 
     debug!(ctx, "try_update_cache: post copy byte_mask: {}", byte_mask);

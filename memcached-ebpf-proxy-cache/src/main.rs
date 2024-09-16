@@ -1,18 +1,16 @@
-#[allow(unused)]
 use anyhow::Context;
-#[allow(unused)]
-use aya::maps::ProgramArray;
-use aya::programs::{tc, SchedClassifier, TcAttachType};
-#[allow(unused)]
-use aya::programs::{Xdp, XdpFlags};
-use aya::{include_bytes_aligned, Bpf};
+use aya::{
+    include_bytes_aligned,
+    maps::ProgramArray,
+    programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
+    Bpf,
+};
 use aya_log::BpfLogger;
 use clap::Parser;
-use log::{debug, info, warn};
-use memcached_ebpf_proxy_cache_common::CallableProgTc;
-#[allow(unused)]
-use memcached_ebpf_proxy_cache_common::CallableProgXdp;
+use log::{debug, error, info, warn};
 use tokio::signal;
+
+use memcached_ebpf_proxy_cache_common::{CallableProgTc, CallableProgXdp};
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -72,6 +70,8 @@ async fn main() -> Result<(), anyhow::Error> {
             info!("Loading XDP program: {}", callable_prog_xdp.as_ref());
             map_callable_progs_xdp.set(callable_prog_xdp as u32, xdp_fd, 0)?;
             num_callable_xdp_programs_loaded += 1;
+        } else {
+            error!("Failed to load XDP program: {}", callable_prog_xdp.as_ref());
         }
     }
 
@@ -95,9 +95,11 @@ async fn main() -> Result<(), anyhow::Error> {
             .and_then(|x| x.fd().ok());
 
         if let Some(tc_fd) = tc_fd {
-            info!("Loading TCP program: {}", callable_prog_tc.as_ref());
+            info!("Loading TC program: {}", callable_prog_tc.as_ref());
             map_callable_progs_tc.set(callable_prog_tc as u32, tc_fd, 0)?;
             num_callable_tc_programs_loaded += 1;
+        } else {
+            error!("Failed to load TC program: {}", callable_prog_tc.as_ref());
         }
     }
 

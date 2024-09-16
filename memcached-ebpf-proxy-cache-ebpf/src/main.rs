@@ -11,7 +11,7 @@ use aya_ebpf::{
     programs::{TcContext, XdpContext},
 };
 use aya_log_ebpf::{debug, error, info};
-use core::{intrinsics::atomic_xchg_seqcst, mem, slice, usize};
+use core::{intrinsics::atomic_xchg_seqcst, mem, slice};
 
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
@@ -696,12 +696,15 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
             .ptr_at::<u8>(byte_offset)
             .ok_or(CacheError::BadRequestPacket)?;
 
+        // check if packet key byte and cache_entry key byte are equal
+        // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
         byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
 
         byte_idx += 1;
         byte_offset += mem::size_of::<u8>();
     }
 
+    // byte_mask != 0 => packet key != cache_entry key
     if cache_entry.valid && cache_entry.hash == key_hash && byte_mask == 0 {
         spin_lock_release(&mut cache_entry.lock);
         return Ok(TC_ACT_OK);

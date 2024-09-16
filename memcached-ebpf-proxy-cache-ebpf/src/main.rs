@@ -692,11 +692,11 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
         && byte_idx < key_length
         && byte_offset < ctx.data_end()
     {
-        let key_byte = ctx
+        let byte_ptr = ctx
             .ptr_at::<u8>(byte_offset)
             .ok_or(CacheError::BadRequestPacket)?;
 
-        byte_mask |= unsafe { *key_byte } ^ cache_entry.data[byte_idx as usize];
+        byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
 
         byte_idx += 1;
         byte_offset += mem::size_of::<u8>();
@@ -716,12 +716,12 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
         && byte_idx < kv_pair_length
         && byte_offset < ctx.data_end()
     {
-        let key_byte = ctx
+        let byte_ptr = ctx
             .ptr_at::<u8>(byte_offset)
             .ok_or(CacheError::BadRequestPacket)?;
 
-        byte_mask |= unsafe { *key_byte };
-        cache_entry.data[byte_idx as usize] = unsafe { *key_byte };
+        byte_mask |= unsafe { *byte_ptr };
+        cache_entry.data[byte_idx as usize] = unsafe { *byte_ptr };
 
         byte_idx += 1;
         byte_offset += mem::size_of::<u8>();

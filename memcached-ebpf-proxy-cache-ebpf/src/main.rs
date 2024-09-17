@@ -475,8 +475,8 @@ fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
             .ptr_at_mut(
                 EthHdr::LEN
                     + Ipv4Hdr::LEN
-                    + TcpHdr::LEN
-                    + MEMCACHED_TCP_ADDITIONAL_PADDING
+                    + UdpHdr::LEN
+                    + mem::size_of::<MemcachedUdpHeader>()
                     + mem::size_of::<MemcachedPacketHeader>(),
             )
             .ok_or(CacheError::HeaderParseError)? as &mut MemcachedPacketHeader

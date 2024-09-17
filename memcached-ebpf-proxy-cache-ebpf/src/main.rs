@@ -15,7 +15,7 @@ use core::{intrinsics::atomic_xchg_seqcst, mem, slice};
 
 use memcached_ebpf_proxy_cache_common::{
     CacheEntry, CacheUsageStatistics, CallableProgTc, CallableProgXdp, Fnv1AHasher, Hasher,
-    CACHE_ENTRY_COUNT, MAX_KEY_LENGTH, MAX_KV_PAIR_LENGTH, MAX_SPIN_LOCK_ITER_RETRY_LIMIT,
+    CACHE_ENTRY_COUNT, MAX_CACHE_ENTRY_DATA_SIZE, MAX_KEY_LENGTH, MAX_SPIN_LOCK_ITER_RETRY_LIMIT,
     MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH, MEMCACHED_PORT,
 };
 use memcached_ebpf_proxy_cache_common::{
@@ -44,6 +44,9 @@ pub struct ParsingContext {
 
 #[map]
 static PARSING_CONTEXT: PerCpuArray<ParsingContext> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static PARSED_PACKET_KEY_HASH: PerCpuArray<u32> = PerCpuArray::with_max_entries(1, 0);
 
 #[map]
 static CACHE_USAGE_STATS: PerCpuArray<CacheUsageStatistics> = PerCpuArray::with_max_entries(1, 0);
@@ -380,6 +383,11 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let cache_idx = key_hash % CACHE_ENTRY_COUNT;
 
+    debug!(
+        ctx,
+        "try_hash_key: key_hash = {}, cache_idx = {}", key_hash, cache_idx
+    );
+
     let cache_entry = MAP_KCACHE
         .get_ptr_mut(cache_idx)
         .ok_or(CacheError::MapLookupError)?;
@@ -415,6 +423,14 @@ fn try_hash_key(ctx: &XdpContext) -> Result<u32, CacheError> {
             return Err(CacheError::KeyNotFound);
         }
 
+        debug!(ctx, "try_hash_key: key_found = {}", key_found as u8);
+
+        let parsed_packet_key_hash = PARSED_PACKET_KEY_HASH
+            .get_ptr_mut(0)
+            .ok_or(CacheError::MapLookupError)?;
+
+        *parsed_packet_key_hash = key_hash;
+
         MAP_CALLABLE_PROGS_XDP
             .tail_call(ctx, CallableProgXdp::PreparePacket as u32)
             .map_err(|_| CacheError::TailCallError)?;
@@ -432,6 +448,69 @@ pub fn hash_key(ctx: XdpContext) -> u32 {
         }
         Err(err) => {
             error!(&ctx, "hash_key: Err({})", err.as_ref());
+            xdp_action::XDP_PASS
+        }
+    }
+}
+
+fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
+    info!(ctx, "try_prepare_packet: received a packet");
+    let ethhdr =
+        unsafe { &mut *ctx.ptr_at_mut(0).ok_or(CacheError::HeaderParseError)? as &mut EthHdr };
+
+    let ipv4hdr = unsafe {
+        &mut *ctx
+            .ptr_at_mut(EthHdr::LEN)
+            .ok_or(CacheError::HeaderParseError)? as &mut Ipv4Hdr
+    };
+
+    let udphdr = unsafe {
+        &mut *ctx
+            .ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)
+            .ok_or(CacheError::HeaderParseError)? as &mut UdpHdr
+    };
+
+    let memcached_packet_header = unsafe {
+        &mut *ctx
+            .ptr_at_mut(
+                EthHdr::LEN
+                    + Ipv4Hdr::LEN
+                    + TcpHdr::LEN
+                    + MEMCACHED_TCP_ADDITIONAL_PADDING
+                    + mem::size_of::<MemcachedPacketHeader>(),
+            )
+            .ok_or(CacheError::HeaderParseError)? as &mut MemcachedPacketHeader
+    };
+
+    mem::swap(&mut ethhdr.src_addr, &mut ethhdr.dst_addr);
+    mem::swap(&mut ipv4hdr.src_addr, &mut ipv4hdr.dst_addr);
+    mem::swap(&mut udphdr.source, &mut udphdr.dest);
+
+    const RES_MAGIC_BYTE: u8 = ResMagicByte::ResPacket as u8;
+
+    memcached_packet_header.magic_byte = RES_MAGIC_BYTE;
+
+    unsafe {
+        MAP_CALLABLE_PROGS_XDP
+            .tail_call(ctx, CallableProgXdp::WriteReply as u32)
+            .map_err(|_| CacheError::TailCallError)?;
+    }
+}
+
+#[xdp]
+pub fn prepare_packet(ctx: XdpContext) -> u32 {
+    info!(&ctx, "prepare_packet: received a packet");
+
+    match try_prepare_packet(&ctx) {
+        Ok(ret) => {
+            info!(
+                &ctx,
+                "prepare_packet: done processing packet, action: {}", ret
+            );
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "prepare_packet: Err({})", err.as_ref());
             xdp_action::XDP_PASS
         }
     }
@@ -653,7 +732,8 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
     let key_length = memcached_packet_header.key_length.get();
     let value_length = memcached_packet_header.value_length() as u16;
 
-    let kv_pair_length = key_length + value_length;
+    let cache_entry_length =
+        MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as u16 + key_length + value_length;
 
     debug!(
         ctx,
@@ -663,9 +743,11 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
         key_length
     );
 
-    const KEY_OFFSET: usize = PAYLOAD_OFFSET
-        + mem::size_of::<MemcachedPacketHeader>()
-        + MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as usize;
+    const MEMCACHED_PACKET_CONTENT_OFFSET: usize =
+        PAYLOAD_OFFSET + mem::size_of::<MemcachedPacketHeader>();
+
+    const KEY_OFFSET: usize =
+        MEMCACHED_PACKET_CONTENT_OFFSET + MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as usize;
 
     let key_hash = try_compute_key_hash(ctx, KEY_OFFSET, key_length)?;
 
@@ -718,10 +800,10 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
     debug!(ctx, "try_update_cache: pre copy byte_mask: {}", byte_mask);
 
     let mut byte_idx: u16 = 0;
-    let mut byte_offset = KEY_OFFSET + byte_idx as usize;
+    let mut byte_offset = MEMCACHED_PACKET_CONTENT_OFFSET + byte_idx as usize;
 
-    while byte_idx < MAX_KV_PAIR_LENGTH as u16
-        && byte_idx < kv_pair_length
+    while byte_idx < MAX_CACHE_ENTRY_DATA_SIZE as u16
+        && byte_idx < cache_entry_length
         && byte_offset < ctx.data_end()
     {
         let byte_ptr = ctx
@@ -739,7 +821,7 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     cache_entry.valid = true;
     cache_entry.hash = key_hash;
-    cache_entry.len = kv_pair_length as u32;
+    cache_entry.len = cache_entry_length as u32;
 
     spin_lock_release(&mut cache_entry.lock);
 

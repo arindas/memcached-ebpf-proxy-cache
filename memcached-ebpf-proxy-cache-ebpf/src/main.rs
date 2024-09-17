@@ -473,11 +473,7 @@ fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
     let memcached_packet_header = unsafe {
         &mut *ctx
             .ptr_at_mut(
-                EthHdr::LEN
-                    + Ipv4Hdr::LEN
-                    + UdpHdr::LEN
-                    + mem::size_of::<MemcachedUdpHeader>()
-                    + mem::size_of::<MemcachedPacketHeader>(),
+                EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + mem::size_of::<MemcachedUdpHeader>(),
             )
             .ok_or(CacheError::HeaderParseError)? as &mut MemcachedPacketHeader
     };

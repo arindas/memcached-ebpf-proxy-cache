@@ -144,10 +144,9 @@ pub struct CacheUsageStatistics {
     pub get_recv_count: u32,
     pub set_recv_count: u32,
 
-    pub hit_misprediction: u32,
+    pub miss_count: u32,
     pub hit_count: u32,
 
-    pub miss_count: u32,
     pub update_count: u32,
     pub invalidation_count: u32,
 }

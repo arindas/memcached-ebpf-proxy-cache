@@ -5,7 +5,7 @@
 
 use aya_ebpf::{
     bindings::{xdp_action, TC_ACT_OK},
-    helpers::bpf_xdp_adjust_head,
+    helpers::{bpf_xdp_adjust_head, bpf_xdp_adjust_tail},
     macros::{classifier, map, xdp},
     maps::{Array, PerCpuArray, ProgramArray},
     programs::{TcContext, XdpContext},
@@ -453,8 +453,8 @@ pub fn hash_key(ctx: XdpContext) -> u32 {
     }
 }
 
-fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
-    info!(ctx, "try_prepare_packet: received a packet");
+#[inline]
+fn try_swap_udp_packet_source_dest<PCtx: PacketCtx>(ctx: &PCtx) -> Result<(), CacheError> {
     let ethhdr =
         unsafe { &mut *ctx.ptr_at_mut(0).ok_or(CacheError::HeaderParseError)? as &mut EthHdr };
 
@@ -470,21 +470,17 @@ fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
             .ok_or(CacheError::HeaderParseError)? as &mut UdpHdr
     };
 
-    let memcached_packet_header = unsafe {
-        &mut *ctx
-            .ptr_at_mut(
-                EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + mem::size_of::<MemcachedUdpHeader>(),
-            )
-            .ok_or(CacheError::HeaderParseError)? as &mut MemcachedPacketHeader
-    };
-
     mem::swap(&mut ethhdr.src_addr, &mut ethhdr.dst_addr);
     mem::swap(&mut ipv4hdr.src_addr, &mut ipv4hdr.dst_addr);
     mem::swap(&mut udphdr.source, &mut udphdr.dest);
 
-    const RES_MAGIC_BYTE: u8 = ResMagicByte::ResPacket as u8;
+    Ok(())
+}
 
-    memcached_packet_header.magic_byte = RES_MAGIC_BYTE;
+fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
+    info!(ctx, "try_prepare_packet: received a packet");
+
+    try_swap_udp_packet_source_dest(ctx)?;
 
     unsafe {
         MAP_CALLABLE_PROGS_XDP
@@ -508,6 +504,153 @@ pub fn prepare_packet(ctx: XdpContext) -> u32 {
         Err(err) => {
             error!(&ctx, "prepare_packet: Err({})", err.as_ref());
             xdp_action::XDP_PASS
+        }
+    }
+}
+
+fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
+    info!(ctx, "try_write_reply: received a packet");
+
+    let cache_usage_stats = CACHE_USAGE_STATS
+        .get_ptr_mut(0)
+        .ok_or(CacheError::MapLookupError)?;
+
+    const MEMCACHED_PACKET_OFFSET: usize =
+        EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + mem::size_of::<MemcachedUdpHeader>();
+
+    const MEMCACHED_PACKET_CONTENT_OFFSET: usize =
+        MEMCACHED_PACKET_OFFSET + mem::size_of::<MemcachedPacketHeader>();
+
+    const KEY_OFFSET: usize =
+        MEMCACHED_PACKET_CONTENT_OFFSET + MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as usize;
+
+    let memcached_packet_header = unsafe {
+        &mut *ctx
+            .ptr_at_mut(MEMCACHED_PACKET_OFFSET)
+            .ok_or(CacheError::HeaderParseError)? as &mut MemcachedPacketHeader
+    };
+
+    let key_length = memcached_packet_header.key_length.get();
+
+    let parsed_packet_key_hash = *PARSED_PACKET_KEY_HASH
+        .get(0)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let cache_idx = parsed_packet_key_hash % CACHE_ENTRY_COUNT;
+
+    debug!(
+        ctx,
+        "try_write_reply: parsed_packet_key_hash = {}, cache_idx = {}",
+        parsed_packet_key_hash,
+        cache_idx
+    );
+
+    let cache_entry = MAP_KCACHE
+        .get_ptr_mut(cache_idx)
+        .ok_or(CacheError::MapLookupError)?;
+
+    let cache_entry = unsafe { &mut *cache_entry };
+
+    try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+        .map_err(|_| CacheError::LockRetryLimitHit)?;
+
+    let mut byte_mask: u8 = 0;
+
+    let mut byte_idx: u16 = 0;
+    let mut byte_offset = KEY_OFFSET + byte_idx as usize;
+
+    let cached_entry_valid_and_key_hash_equal =
+        cache_entry.valid && cache_entry.hash == parsed_packet_key_hash;
+
+    while cached_entry_valid_and_key_hash_equal
+        && byte_idx < MAX_KEY_LENGTH as u16
+        && byte_idx < key_length
+        && byte_offset < ctx.data_end()
+    {
+        let byte_ptr = ctx
+            .ptr_at::<u8>(byte_offset)
+            .ok_or(CacheError::BadRequestPacket)?;
+
+        // check if packet key byte and cache_entry key byte are equal
+        // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
+        byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
+
+        byte_idx += 1;
+        byte_offset += mem::size_of::<u8>();
+    }
+
+    // byte_mask != 0 => packet key != cache_entry key
+    if !cached_entry_valid_and_key_hash_equal || byte_mask != 0 {
+        spin_lock_release(&mut cache_entry.lock);
+
+        unsafe { (*cache_usage_stats).miss_count += 1 };
+
+        try_swap_udp_packet_source_dest(ctx)?;
+
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    const RES_MAGIC_BYTE: u8 = ResMagicByte::ResPacket as u8;
+    memcached_packet_header.magic_byte = RES_MAGIC_BYTE;
+
+    debug!(ctx, "try_write_reply: pre copy byte_mask: {}", byte_mask);
+
+    let cache_entry_length = cache_entry.len as u16;
+    let adjust_tail_delta = if cache_entry_length > key_length {
+        cache_entry_length - key_length
+    } else {
+        0
+    };
+
+    const MAX_ADJUST_DELTA: usize = MAX_CACHE_ENTRY_DATA_SIZE - 1;
+
+    if adjust_tail_delta > MAX_ADJUST_DELTA as u16 {
+        return Err(CacheError::UnexpectedValLen);
+    }
+
+    if unsafe { bpf_xdp_adjust_tail(ctx.ctx, adjust_tail_delta as i32) } != 0 {
+        return Err(CacheError::UnexpectedValLen);
+    }
+
+    let mut byte_idx: u16 = 0;
+    let mut byte_offset = MEMCACHED_PACKET_CONTENT_OFFSET + byte_idx as usize;
+
+    while byte_idx < MAX_CACHE_ENTRY_DATA_SIZE as u16
+        && byte_idx < cache_entry_length
+        && byte_offset < ctx.data_end()
+    {
+        let byte_mut_ptr = ctx
+            .ptr_at_mut::<u8>(byte_offset)
+            .ok_or(CacheError::BadRequestPacket)?;
+
+        unsafe { *byte_mut_ptr = cache_entry.data[byte_idx as usize] };
+        byte_mask |= unsafe { *byte_mut_ptr };
+
+        byte_idx += 1;
+        byte_offset += mem::size_of::<u8>();
+    }
+
+    debug!(ctx, "try_write_reply: post copy byte_mask: {}", byte_mask);
+
+    spin_lock_release(&mut cache_entry.lock);
+
+    unsafe { (*cache_usage_stats).hit_count += 1 };
+
+    Ok(xdp_action::XDP_TX)
+}
+
+#[xdp]
+fn write_reply(ctx: XdpContext) -> u32 {
+    info!(&ctx, "write_reply: received a packet");
+
+    match try_write_reply(&ctx) {
+        Ok(ret) => {
+            info!(&ctx, "write_reply: done processing packet, action: {}", ret);
+            ret
+        }
+        Err(err) => {
+            error!(&ctx, "write_reply: Err({})", err.as_ref());
+            xdp_action::XDP_DROP
         }
     }
 }

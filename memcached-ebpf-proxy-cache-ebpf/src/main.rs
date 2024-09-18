@@ -562,22 +562,22 @@ fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
     let cached_entry_valid_and_key_hash_equal =
         cache_entry.valid && cache_entry.hash == parsed_packet_key_hash;
 
-    while cached_entry_valid_and_key_hash_equal
-        && byte_idx < MAX_KEY_LENGTH as u16
-        && byte_idx < key_length
-        && byte_offset < ctx.data_end()
-    {
-        let byte_ptr = ctx
-            .ptr_at::<u8>(byte_offset)
-            .ok_or(CacheError::BadRequestPacket)?;
+    // while cached_entry_valid_and_key_hash_equal
+    //     && byte_idx < MAX_KEY_LENGTH as u16
+    //     && byte_idx < key_length
+    //     && byte_offset < ctx.data_end()
+    // {
+    //     let byte_ptr = ctx
+    //         .ptr_at::<u8>(byte_offset)
+    //         .ok_or(CacheError::BadRequestPacket)?;
 
-        // check if packet key byte and cache_entry key byte are equal
-        // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
-        byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
+    //     // check if packet key byte and cache_entry key byte are equal
+    //     // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
+    //     byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
 
-        byte_idx += 1;
-        byte_offset += mem::size_of::<u8>();
-    }
+    //     byte_idx += 1;
+    //     byte_offset += mem::size_of::<u8>();
+    // }
 
     // byte_mask != 0 => packet key != cache_entry key
     if !cached_entry_valid_and_key_hash_equal || byte_mask != 0 {
@@ -592,6 +592,7 @@ fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     const RES_MAGIC_BYTE: u8 = ResMagicByte::ResPacket as u8;
     memcached_packet_header.magic_byte = RES_MAGIC_BYTE;
+    memcached_packet_header.total_body_length = cache_entry.len.into();
 
     debug!(ctx, "try_write_reply: pre copy byte_mask: {}", byte_mask);
 
@@ -630,7 +631,13 @@ fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
         byte_offset += mem::size_of::<u8>();
     }
 
-    debug!(ctx, "try_write_reply: post copy byte_mask: {}", byte_mask);
+    debug!(
+        ctx,
+        "try_write_reply: post copy byte_mask: {}, byte_idx = {}, cache_entry_length = {}",
+        byte_mask,
+        byte_idx,
+        cache_entry_length
+    );
 
     spin_lock_release(&mut cache_entry.lock);
 

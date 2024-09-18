@@ -9,6 +9,7 @@ use aya_ebpf::{
     macros::{classifier, map, xdp},
     maps::{Array, PerCpuArray, ProgramArray},
     programs::{TcContext, XdpContext},
+    EbpfContext,
 };
 use aya_log_ebpf::{debug, error, info};
 use core::{intrinsics::atomic_xchg_seqcst, mem, slice};
@@ -115,7 +116,7 @@ pub fn compute_ip_checksum(ip: *const Ipv4Hdr) -> u16 {
     (!((csum & 0xffff) + (csum >> 16))) as u16
 }
 
-pub trait PacketCtx {
+pub trait PacketCtx: EbpfContext {
     #[inline(always)]
     fn ptr_at<T>(&self, offset: usize) -> Option<*const T> {
         let start = self.data();
@@ -477,6 +478,55 @@ fn try_swap_udp_packet_source_dest<PCtx: PacketCtx>(ctx: &PCtx) -> Result<(), Ca
     Ok(())
 }
 
+#[inline]
+fn try_increase_udp_packet_size<PCtx: PacketCtx>(ctx: &PCtx, inc: u16) -> Result<(), CacheError> {
+    let ipv4hdr = unsafe {
+        &mut *ctx
+            .ptr_at_mut(EthHdr::LEN)
+            .ok_or(CacheError::HeaderParseError)? as &mut Ipv4Hdr
+    };
+
+    let udphdr = unsafe {
+        &mut *ctx
+            .ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)
+            .ok_or(CacheError::HeaderParseError)? as &mut UdpHdr
+    };
+
+    debug!(ctx, "try_increase_udp_packet_size: inc = {}", inc);
+
+    debug!(
+        ctx,
+        "try_increase_udp_packet_size: ipv4hdr tot_len = {}",
+        ipv4hdr.tot_len.to_be()
+    );
+
+    ipv4hdr.tot_len += inc.to_be();
+    ipv4hdr.check = compute_ip_checksum(ipv4hdr as *const Ipv4Hdr);
+
+    debug!(
+        ctx,
+        "try_increase_udp_packet_size: ipv4hdr tot_len = {}",
+        ipv4hdr.tot_len.to_be()
+    );
+
+    debug!(
+        ctx,
+        "try_increase_udp_packet_size: udphdr len = {}",
+        udphdr.len.to_be()
+    );
+
+    udphdr.check = 0;
+    udphdr.len += inc.to_be();
+
+    debug!(
+        ctx,
+        "try_increase_udp_packet_size: udphdr len = {}",
+        udphdr.len.to_be()
+    );
+
+    Ok(())
+}
+
 fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
     info!(ctx, "try_prepare_packet: received a packet");
 
@@ -592,6 +642,7 @@ fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     const RES_MAGIC_BYTE: u8 = ResMagicByte::ResPacket as u8;
     memcached_packet_header.magic_byte = RES_MAGIC_BYTE;
+    memcached_packet_header.extras_length = MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH;
     memcached_packet_header.total_body_length = cache_entry.len.into();
 
     debug!(ctx, "try_write_reply: pre copy byte_mask: {}", byte_mask);
@@ -640,6 +691,8 @@ fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
     );
 
     spin_lock_release(&mut cache_entry.lock);
+
+    try_increase_udp_packet_size(ctx, adjust_tail_delta)?;
 
     unsafe { (*cache_usage_stats).hit_count += 1 };
 

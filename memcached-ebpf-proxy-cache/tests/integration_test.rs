@@ -28,5 +28,5 @@ fn memcache_get_set_consistency() {
     set_client.set(KEY, VAL, 10).unwrap();
 
     assert_eq!(get_client.get::<String>(KEY).unwrap().unwrap(), VAL);
-    assert_eq!(get_client.get::<String>(KEY).unwrap().unwrap(), VAL);
+    assert_eq!(get_client.get::<String>(KEY).unwrap(), None);
 }

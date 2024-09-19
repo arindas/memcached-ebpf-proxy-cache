@@ -530,8 +530,6 @@ fn try_increase_udp_packet_size<PCtx: PacketCtx>(ctx: &PCtx, inc: u16) -> Result
 fn try_prepare_packet(ctx: &XdpContext) -> Result<u32, CacheError> {
     info!(ctx, "try_prepare_packet: received a packet");
 
-    try_swap_udp_packet_source_dest(ctx)?;
-
     unsafe {
         MAP_CALLABLE_PROGS_XDP
             .tail_call(ctx, CallableProgXdp::WriteReply as u32)
@@ -606,28 +604,28 @@ fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
 
     let mut byte_mask: u8 = 0;
 
-    let mut byte_idx: u16 = 0;
+    let mut byte_idx: u16 = MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as u16;
     let mut byte_offset = KEY_OFFSET + byte_idx as usize;
 
     let cached_entry_valid_and_key_hash_equal =
         cache_entry.valid && cache_entry.hash == parsed_packet_key_hash;
 
-    // while cached_entry_valid_and_key_hash_equal
-    //     && byte_idx < MAX_KEY_LENGTH as u16
-    //     && byte_idx < key_length
-    //     && byte_offset < ctx.data_end()
-    // {
-    //     let byte_ptr = ctx
-    //         .ptr_at::<u8>(byte_offset)
-    //         .ok_or(CacheError::BadRequestPacket)?;
+    while cached_entry_valid_and_key_hash_equal
+        && byte_idx < MAX_KEY_LENGTH as u16
+        && byte_idx < key_length
+        && byte_offset < ctx.data_end()
+    {
+        let byte_ptr = ctx
+            .ptr_at::<u8>(byte_offset)
+            .ok_or(CacheError::BadRequestPacket)?;
 
-    //     // check if packet key byte and cache_entry key byte are equal
-    //     // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
-    //     byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
+        // check if packet key byte and cache_entry key byte are equal
+        // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
+        byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
 
-    //     byte_idx += 1;
-    //     byte_offset += mem::size_of::<u8>();
-    // }
+        byte_idx += 1;
+        byte_offset += mem::size_of::<u8>();
+    }
 
     // byte_mask != 0 => packet key != cache_entry key
     if !cached_entry_valid_and_key_hash_equal || byte_mask != 0 {
@@ -635,10 +633,10 @@ fn try_write_reply(ctx: &XdpContext) -> Result<u32, CacheError> {
 
         unsafe { (*cache_usage_stats).miss_count += 1 };
 
-        try_swap_udp_packet_source_dest(ctx)?;
-
         return Ok(xdp_action::XDP_PASS);
     }
+
+    try_swap_udp_packet_source_dest(ctx)?;
 
     const RES_MAGIC_BYTE: u8 = ResMagicByte::ResPacket as u8;
     memcached_packet_header.magic_byte = RES_MAGIC_BYTE;
@@ -710,7 +708,7 @@ fn write_reply(ctx: XdpContext) -> u32 {
         }
         Err(err) => {
             error!(&ctx, "write_reply: Err({})", err.as_ref());
-            xdp_action::XDP_DROP
+            xdp_action::XDP_PASS
         }
     }
 }
@@ -968,7 +966,7 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     let mut byte_mask: u8 = 0;
 
-    let mut byte_idx: u16 = 0;
+    let mut byte_idx: u16 = MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as u16;
     let mut byte_offset = KEY_OFFSET + byte_idx as usize;
 
     let cached_entry_valid_and_key_hash_equal = cache_entry.valid && cache_entry.hash == key_hash;

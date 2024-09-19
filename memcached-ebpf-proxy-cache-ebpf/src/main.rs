@@ -501,6 +501,7 @@ fn try_increase_udp_packet_size<PCtx: PacketCtx>(ctx: &PCtx, inc: u16) -> Result
     );
 
     ipv4hdr.tot_len += inc.to_be();
+    ipv4hdr.check = 0;
     ipv4hdr.check = compute_ip_checksum(ipv4hdr as *const Ipv4Hdr);
 
     debug!(

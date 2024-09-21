@@ -965,28 +965,31 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
     try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
         .map_err(|_| CacheError::LockRetryLimitHit)?;
 
-    let mut byte_mask: u8 = 0;
-
-    let mut byte_idx: u16 = MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as u16;
-    let mut byte_offset = KEY_OFFSET + byte_idx as usize;
-
     let cached_entry_valid_and_key_hash_equal = cache_entry.valid && cache_entry.hash == key_hash;
 
-    while cached_entry_valid_and_key_hash_equal
-        && byte_idx < MAX_KEY_LENGTH as u16
-        && byte_idx < key_length
-        && byte_offset < ctx.data_end()
+    let mut byte_mask: u8 = 0;
+
+    #[cfg(feature = "update_key_check")]
     {
-        let byte_ptr = ctx
-            .ptr_at::<u8>(byte_offset)
-            .ok_or(CacheError::BadRequestPacket)?;
+        let mut byte_idx: u16 = MEMCACHED_GET_PACKET_HEADER_EXTRAS_LENGTH as u16;
+        let mut byte_offset = KEY_OFFSET + byte_idx as usize;
 
-        // check if packet key byte and cache_entry key byte are equal
-        // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
-        byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
+        while cached_entry_valid_and_key_hash_equal
+            && byte_idx < MAX_KEY_LENGTH as u16
+            && byte_idx < key_length
+            && byte_offset < ctx.data_end()
+        {
+            let byte_ptr = ctx
+                .ptr_at::<u8>(byte_offset)
+                .ok_or(CacheError::BadRequestPacket)?;
 
-        byte_idx += 1;
-        byte_offset += mem::size_of::<u8>();
+            // check if packet key byte and cache_entry key byte are equal
+            // a ^ b == 0 => a == b; a | 0 = a; a | 1 = 1;
+            byte_mask |= unsafe { *byte_ptr } ^ cache_entry.data[byte_idx as usize];
+
+            byte_idx += 1;
+            byte_offset += mem::size_of::<u8>();
+        }
     }
 
     // byte_mask != 0 => packet key != cache_entry key

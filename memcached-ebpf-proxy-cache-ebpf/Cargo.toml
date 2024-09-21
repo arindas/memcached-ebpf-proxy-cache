@@ -10,6 +10,10 @@ memcached-ebpf-proxy-cache-common = { path = "../memcached-ebpf-proxy-cache-comm
 memcached-network-types = "0.1.4"
 network-types = "0.0.6"
 
+[features]
+default = []
+update_key_check = []
+
 [[bin]]
 name = "memcached-ebpf-proxy-cache"
 path = "src/main.rs"

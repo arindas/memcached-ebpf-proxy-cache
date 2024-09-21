@@ -962,8 +962,11 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
 
     let cache_entry = unsafe { &mut *cache_entry };
 
-    try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
-        .map_err(|_| CacheError::LockRetryLimitHit)?;
+    #[cfg(feature = "update_key_lock")]
+    {
+        try_spin_lock_acquire(&mut cache_entry.lock, MAX_SPIN_LOCK_ITER_RETRY_LIMIT)
+            .map_err(|_| CacheError::LockRetryLimitHit)?;
+    }
 
     let cached_entry_valid_and_key_hash_equal = cache_entry.valid && cache_entry.hash == key_hash;
 
@@ -1024,7 +1027,10 @@ pub fn try_update_cache(ctx: &TcContext) -> Result<i32, CacheError> {
     cache_entry.hash = key_hash;
     cache_entry.len = cache_entry_length as u32;
 
-    spin_lock_release(&mut cache_entry.lock);
+    #[cfg(feature = "update_key_lock")]
+    {
+        spin_lock_release(&mut cache_entry.lock);
+    }
 
     unsafe {
         (*cache_usage_stats).update_count += 1;

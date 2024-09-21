@@ -1,0 +1,9 @@
+[package]
+name = "memcached-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itertools = "*"
+memcache = "*"
+zzz = "*"

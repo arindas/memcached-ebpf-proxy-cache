@@ -13,6 +13,7 @@ network-types = "0.0.6"
 [features]
 default = []
 update_key_check = []
+update_key_lock = []
 
 [[bin]]
 name = "memcached-ebpf-proxy-cache"

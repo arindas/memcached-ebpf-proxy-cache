@@ -46,7 +46,7 @@ We maintain a [BPF_MAP_TYPE_ARRAY](https://docs.kernel.org/bpf/map_array.html) f
 entries in our eBPF program. We use it to implement hashmap as follows:
 
 ```
-CACHE[ fnv_1_a_hash(key) % CACHE_SIZE ] = (extra, KEY, VAL)
+CACHE[ fnv_1_a_hash(KEY) % CACHE_SIZE ] = (extra, KEY, VAL)
 ```
 
 where `extra` refers to the `extra` bytes in a memcached `GET` response.
@@ -83,7 +83,7 @@ The egress path involves the following eBPF programs:
 Start tracing UDP packet traffic on port 11211 with the following command:
 
 ```sh
-sudo tcpdump -Xi lo -vvv -n udp port 11211
+sudo tcpdump -Xi lo -n udp port 11211
 ```
 
 First, test the control behaviour by running the test:
@@ -169,6 +169,9 @@ Now start `memcached-ebpf-proxy-cache`:
 ```sh
 RUST_LOG=debug cargo xtask run  -- --iface lo
 ```
+
+The first `GET` should trigger an `update_cache` while the second `GET` should lead
+to a cache hit and trigger `write_reply`. Let's see if we can reproduce this behaviour.
 
 Now run `cargo test` and inspect the traffic again.
 

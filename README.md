@@ -38,8 +38,8 @@ RUST_LOG=debug cargo xtask run  -- --iface lo
 
 ## Overview
 
-`memcached-ebpf-proxy-cache` maintains a smaller cache in the eBPF layer in front of `memcached`
-to service `memcached` requests right from the eBPF layer. _In theory_, for small GET requests (< 250 bytes),
+memcached-ebpf-proxy-cache maintains a smaller cache in the eBPF layer in front of memcached
+to service memcached requests right from the eBPF layer. _In theory_, for small GET requests (< 250 bytes),
 the networking stack adds a substantial overhead while the request is processed. eBPF allows a way
 to intercept and respond to the request even before it enters the networking stack.
 

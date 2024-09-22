@@ -5,32 +5,17 @@ Intercept and serve `memcached` requests from eBPF.
 > [!WARNING]  
 > This project was made for learning purposes and is not meant for production usage.
 
-## Prerequisites
-
-1. Install bpf-linker: `cargo install bpf-linker`
-
-## Build eBPF
-
-```bash
-cargo xtask build-ebpf
-```
-
-To perform a release build you can use the `--release` flag.
-You may also change the target architecture with the `--target` flag.
-
-## Build Userspace
-
-```bash
-cargo build
-```
-
-## Build eBPF and Userspace
-
-```bash
-cargo xtask build
-```
-
 ## Run
+
+### Prerequisites
+
+Install bpf-linker:
+
+```sh
+cargo install bpf-linker
+```
+
+Start `memcached-ebpf-proxy-cache`:
 
 ```bash
 RUST_LOG=debug cargo xtask run  -- --iface lo

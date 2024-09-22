@@ -307,3 +307,7 @@ Regardless this was a fun learning exercise. I learned a lot about:
 
 I have more or less achieved what I wanted to - which was to understand how to write eBPF programs. So I'll stop
 here for now. Regardless, all contributions to improve performance are very much welcome.
+
+## License
+
+This repository is licensed under the MIT License. See [LICENSE](./LICENSE) for more details.

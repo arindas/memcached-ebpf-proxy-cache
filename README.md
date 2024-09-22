@@ -2,6 +2,9 @@
 
 Intercept and serve `memcached` requests from eBPF.
 
+> [!WARNING]  
+> This project was made for learning purposes and is not meant for production usage.
+
 ## Prerequisites
 
 1. Install bpf-linker: `cargo install bpf-linker`
@@ -249,10 +252,10 @@ The original paper used the memcached ASCII protocol. Also it made some enhancem
 be able to utilize [`SO_REUSEPORT`](https://lwn.net/Articles/542629/) to enhance multi-threaded performance.
 
 In the project, I wanted to explore how far I could go using only eBPF and the stock `memcached` package
-that's available in Ubuntu 22.04 package repository. I also opted for the memcached binary protocol since
-that's the one that's mostly used in production. So any lack of performance increase is solely on this
-particular implementation. A faithful implementation of the paper should definitely be able to achieve the
-published speedup.
+that's available in Ubuntu 22.04 or Arch Linux package repository. I also opted for the memcached binary
+protocol since that's the one that's mostly used in production. So any lack of performance increase is solely
+on this particular implementation. A faithful implementation of the paper should definitely be able to achieve
+the published speedup.
 
 The original paper authors also provided their own implementation here: <https://github.com/Orange-OpenSource/bmc-cache/>
 
@@ -279,8 +282,43 @@ RUST_LOG=debug cargo xtask run  -- --iface lo
 cargo run -p memcached-bench
 ```
 
-Doing this yields the following results on my machine:
+Doing this yields the following results on my machine (HP Pavilion x360 Convertible 14-ba0xx running Endeavour OS):
 
+```text
+# without memcached-ebpf-proxy-cache
+100.00% |█████████████████████████████████████████████████████████████████▏| 91.00/91.00 [00:00:00] (11.58 it/s)
+Time spent in SET loop: 7.856820009s
+100.00% |███████████████████████████████████████████████████████████████▏| 10.00K/10.00K [00:00:00] (8.20K it/s)
+Time spent in GET loop: 1.219417s
+
+# with memcached-ebpf-proxy-cache
+100.00% |█████████████████████████████████████████████████████████████████▏| 91.00/91.00 [00:00:00] (11.56 it/s)
+Time spent in SET loop: 7.874415797s
+100.00% |███████████████████████████████████████████████████████████████▏| 10.00K/10.00K [00:00:00] (5.37K it/s)
+Time spent in GET loop: 1.861354611s
 ```
 
-```
+There's a slight decrease in performance instead of the increase in performance we were expecting.
+
+There can be a couple of reasons for this:
+
+- The binary protocol may be inherently much more efficient than the ASCII protocol, where the overhead due to
+  the networking stack doesn't matter. Rather the `memcpy()` in the eBPF layer might be incurring an overhead.
+- Lack of proper [`bpf_spin_lock`](https://docs.kernel.org/bpf/graph_ds_impl.html#id3) support in aya-rs - [aya-rs
+  currently lacks support for bpf_spin_lock](https://github.com/aya-rs/aya/issues/857) due to this
+  [issue](https://github.com/aya-rs/aya/issues/351) as of 22-09-2024. So I improvised and implemented my
+  own spinlock using atomic instrinsics. My implementation may not be as efficient as the real thing.
+- We are sending back both the KEY and VAL in GET requests. This can incur a data transfer overhead.
+  (Although, we are still on localhost.)
+
+Regardless this was a fun learning exercise. I learned a lot about:
+
+- XDP and TC packet filtering and processing
+- Packet unpacking and restructuring at different protocol levels
+- Tail calls
+- Different map types: BPF Map type Array, Program Array, Per CPU array etc.
+- Atomic instrinsics
+- Satisfying the eBPF verifier with proper loop range and memory acccess bounds
+
+I have more or less achieved what I wanted to - which was to understand how to write eBPF programs. So I'll stop
+here for now. Regardless, all contributions to improve performance are very much welcome.

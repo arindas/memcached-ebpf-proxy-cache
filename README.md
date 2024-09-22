@@ -5,32 +5,17 @@ Intercept and serve `memcached` requests from eBPF.
 > [!WARNING]  
 > This project was made for learning purposes and is not meant for production usage.
 
-## Prerequisites
-
-1. Install bpf-linker: `cargo install bpf-linker`
-
-## Build eBPF
-
-```bash
-cargo xtask build-ebpf
-```
-
-To perform a release build you can use the `--release` flag.
-You may also change the target architecture with the `--target` flag.
-
-## Build Userspace
-
-```bash
-cargo build
-```
-
-## Build eBPF and Userspace
-
-```bash
-cargo xtask build
-```
-
 ## Run
+
+### Prerequisites
+
+Install bpf-linker:
+
+```sh
+cargo install bpf-linker
+```
+
+Start `memcached-ebpf-proxy-cache`:
 
 ```bash
 RUST_LOG=debug cargo xtask run  -- --iface lo
@@ -38,8 +23,8 @@ RUST_LOG=debug cargo xtask run  -- --iface lo
 
 ## Overview
 
-`memcached-ebpf-proxy-cache` maintains a smaller cache in the eBPF layer in front of `memcached`
-to service `memcached` requests right from the eBPF layer. _In theory_, for small GET requests (< 250 bytes),
+memcached-ebpf-proxy-cache maintains a smaller cache in the eBPF layer in front of memcached
+to service memcached requests right from the eBPF layer. _In theory_, for small GET requests (< 250 bytes),
 the networking stack adds a substantial overhead while the request is processed. eBPF allows a way
 to intercept and respond to the request even before it enters the networking stack.
 
@@ -322,3 +307,7 @@ Regardless this was a fun learning exercise. I learned a lot about:
 
 I have more or less achieved what I wanted to - which was to understand how to write eBPF programs. So I'll stop
 here for now. Regardless, all contributions to improve performance are very much welcome.
+
+## License
+
+This repository is licensed under the MIT License. See [LICENSE](./LICENSE) for more details.

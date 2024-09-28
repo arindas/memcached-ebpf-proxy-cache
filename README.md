@@ -46,7 +46,7 @@ We maintain a [BPF_MAP_TYPE_ARRAY](https://docs.kernel.org/bpf/map_array.html) f
 entries in our eBPF program. We use it to implement hashmap as follows:
 
 ```
-CACHE[ fnv_1_a_hash(key) % CACHE_SIZE ] = (extra, KEY, VAL)
+CACHE[ fnv_1_a_hash(KEY) % CACHE_SIZE ] = (extra, KEY, VAL)
 ```
 
 where `extra` refers to the `extra` bytes in a memcached `GET` response.
@@ -83,7 +83,7 @@ The egress path involves the following eBPF programs:
 Start tracing UDP packet traffic on port 11211 with the following command:
 
 ```sh
-sudo tcpdump -Xi lo -vvv -n udp port 11211
+sudo tcpdump -Xi lo -n udp port 11211
 ```
 
 First, test the control behaviour by running the test:
@@ -169,6 +169,9 @@ Now start `memcached-ebpf-proxy-cache`:
 ```sh
 RUST_LOG=debug cargo xtask run  -- --iface lo
 ```
+
+The first `GET` should trigger an `update_cache` while the second `GET` should lead
+to a cache hit and trigger `write_reply`. Let's see if we can reproduce this behaviour.
 
 Now run `cargo test` and inspect the traffic again.
 
@@ -292,7 +295,8 @@ There can be a couple of reasons for this:
 - Lack of proper [`bpf_spin_lock`](https://docs.kernel.org/bpf/graph_ds_impl.html#id3) support in aya-rs - [aya-rs
   currently lacks support for bpf_spin_lock](https://github.com/aya-rs/aya/issues/857) due to this
   [issue](https://github.com/aya-rs/aya/issues/351) as of 22-09-2024. So I improvised and implemented my
-  own spinlock using atomic instrinsics. My implementation may not be as efficient as the real thing.
+  own spinlock using atomic intrinsic [`atomic_xchg_seqcst`](https://doc.rust-lang.org/core/intrinsics/fn.atomic_xchg_seqcst.html).
+  My implementation may not be as efficient as the real thing.
 - We are sending back both the KEY and VAL in GET requests. This can incur a data transfer overhead.
   (Although, we are still on localhost.)
 
@@ -302,7 +306,7 @@ Regardless this was a fun learning exercise. I learned a lot about:
 - Packet unpacking and restructuring at different protocol levels
 - Tail calls
 - Different map types: BPF Map type Array, Program Array, Per CPU array etc.
-- Atomic instrinsics
+- Atomic intrinsics
 - Satisfying the eBPF verifier with proper loop range and memory acccess bounds
 
 I have more or less achieved what I wanted to - which was to understand how to write eBPF programs. So I'll stop

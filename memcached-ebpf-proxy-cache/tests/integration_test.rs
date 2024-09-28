@@ -2,7 +2,7 @@ pub const MEMCACHED_GET_PROTOCOL: &str = "udp";
 
 pub const MEMCACHED_SET_PROTOCOL: &str = "tcp";
 
-pub const MEMCACHED_HOST: &str = "0.0.0.0";
+pub const MEMCACHED_HOST: &str = "127.0.0.1";
 
 pub const MEMCACHED_PORT: u16 = 11211;
 

@@ -295,7 +295,8 @@ There can be a couple of reasons for this:
 - Lack of proper [`bpf_spin_lock`](https://docs.kernel.org/bpf/graph_ds_impl.html#id3) support in aya-rs - [aya-rs
   currently lacks support for bpf_spin_lock](https://github.com/aya-rs/aya/issues/857) due to this
   [issue](https://github.com/aya-rs/aya/issues/351) as of 22-09-2024. So I improvised and implemented my
-  own spinlock using atomic instrinsics. My implementation may not be as efficient as the real thing.
+  own spinlock using atomic intrinsic [`atomic_xchg_seqcst`](https://doc.rust-lang.org/core/intrinsics/fn.atomic_xchg_seqcst.html).
+  My implementation may not be as efficient as the real thing.
 - We are sending back both the KEY and VAL in GET requests. This can incur a data transfer overhead.
   (Although, we are still on localhost.)
 
@@ -305,7 +306,7 @@ Regardless this was a fun learning exercise. I learned a lot about:
 - Packet unpacking and restructuring at different protocol levels
 - Tail calls
 - Different map types: BPF Map type Array, Program Array, Per CPU array etc.
-- Atomic instrinsics
+- Atomic intrinsics
 - Satisfying the eBPF verifier with proper loop range and memory acccess bounds
 
 I have more or less achieved what I wanted to - which was to understand how to write eBPF programs. So I'll stop
